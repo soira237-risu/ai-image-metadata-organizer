@@ -8,16 +8,14 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
-	"imv/internal/mover"
-	"imv/internal/scanner"
+	"imv/internal/appcore"
 	"imv/internal/store"
 )
 
-const defaultDBPath = ".imv/imv.db"
+const defaultDBPath = appcore.DefaultDBPath
 
 func main() {
 	if err := runWithIO(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -72,17 +70,11 @@ func runScan(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("usage: imv scan <folder> [--db %s] [--workers 4] [--rescan] [--json]", defaultDBPath)
 	}
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	result, err := scanner.Scan(context.Background(), db, scanner.Options{
+	result, err := appcore.New(*dbPath).Scan(context.Background(), appcore.ScanRequest{
 		Root:    fs.Arg(0),
 		Workers: *workers,
 		Rescan:  *rescan,
-	})
+	}, nil)
 	if err != nil {
 		return err
 	}
@@ -91,7 +83,7 @@ func runScan(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "scanned=%d indexed=%d skipped=%d errors=%d\n", result.Scanned, result.Indexed, result.Skipped, len(result.Errors))
 	for _, scanErr := range result.Errors {
-		fmt.Fprintf(stderr, "%s: %v\n", scanErr.Path, scanErr.Err)
+		fmt.Fprintf(stderr, "%s: %s\n", scanErr.Path, scanErr.Error)
 	}
 	return nil
 }
@@ -108,16 +100,14 @@ func runShow(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("usage: imv show <path-or-id> [--raw] [--json]")
 	}
 
-	db, err := store.Open(*dbPath)
+	detail, err := appcore.New(*dbPath).GetImage(context.Background(), appcore.GetImageRequest{
+		Ref:        fs.Arg(0),
+		IncludeRaw: *raw,
+	})
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-
-	record, err := findRecord(db, fs.Arg(0), *raw)
-	if err != nil {
-		return err
-	}
+	record := detail.Record
 	if *asJSON {
 		return printJSON(stdout, record, true)
 	}
@@ -156,13 +146,7 @@ func runSearch(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	records, err := db.Search(store.SearchOptions{
+	records, err := appcore.New(*dbPath).Search(context.Background(), appcore.SearchRequest{
 		Tag:         *tag,
 		Source:      *source,
 		Query:       *query,
@@ -190,13 +174,7 @@ func runTags(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	tags, err := db.TagsSummary(store.TagSummaryOptions{
+	tags, err := appcore.New(*dbPath).Tags(context.Background(), appcore.TagsRequest{
 		Source: *source,
 		Query:  *query,
 		Limit:  *limit,
@@ -218,13 +196,7 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	stats, err := db.Stats()
+	stats, err := appcore.New(*dbPath).Stats(context.Background())
 	if err != nil {
 		return err
 	}
@@ -246,21 +218,8 @@ func runExport(args []string, stderr io.Writer) error {
 		return fmt.Errorf("usage: imv export --out <file.json> [--pretty]")
 	}
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	records, err := db.Export()
-	if err != nil {
-		return err
-	}
-	data, err := marshal(records, *pretty)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(*out, data, 0644)
+	_, err := appcore.New(*dbPath).Export(context.Background(), appcore.ExportRequest{Out: *out, Pretty: *pretty})
+	return err
 }
 
 func runMove(args []string, stdout, stderr io.Writer) error {
@@ -278,19 +237,14 @@ func runMove(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("usage: imv move --tag <tag> --to <folder> [--apply] [--conflict skip|rename]")
 	}
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
+	service := appcore.New(*dbPath)
+	var plans []appcore.MovePlan
+	var err error
+	if *apply {
+		plans, err = service.ApplyMove(context.Background(), appcore.MoveRequest{Tag: *tag, To: *to, Conflict: *conflict})
+	} else {
+		plans, err = service.PlanMove(context.Background(), appcore.MoveRequest{Tag: *tag, To: *to, Conflict: *conflict})
 	}
-	defer db.Close()
-
-	plans, err := mover.PlanAndMaybeApply(context.Background(), db, mover.Options{
-		Tag:      *tag,
-		To:       *to,
-		Apply:    *apply,
-		Conflict: *conflict,
-		LogPath:  ".imv/move-log.jsonl",
-	})
 	if err != nil {
 		return err
 	}
@@ -301,13 +255,6 @@ func runMove(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "%s\t%s -> %s\t%s\n", plan.Status, plan.SourcePath, plan.DestinationPath, plan.Reason)
 	}
 	return nil
-}
-
-func findRecord(db *store.DB, value string, includeRaw bool) (store.ImageRecord, error) {
-	if id, err := strconv.ParseInt(value, 10, 64); err == nil {
-		return db.GetByID(id, includeRaw)
-	}
-	return db.GetByPath(value, includeRaw)
 }
 
 func parseInterspersed(fs *flag.FlagSet, args []string) error {
@@ -395,14 +342,14 @@ type scanResultOutput struct {
 	Errors  []scanErrorOutput `json:"errors"`
 }
 
-func scanOutput(result scanner.Result) scanResultOutput {
+func scanOutput(result appcore.ScanResult) scanResultOutput {
 	out := scanResultOutput{
 		Scanned: result.Scanned,
 		Indexed: result.Indexed,
 		Skipped: result.Skipped,
 	}
 	for _, item := range result.Errors {
-		out.Errors = append(out.Errors, scanErrorOutput{Path: item.Path, Error: item.Err.Error()})
+		out.Errors = append(out.Errors, scanErrorOutput{Path: item.Path, Error: item.Error})
 	}
 	return out
 }

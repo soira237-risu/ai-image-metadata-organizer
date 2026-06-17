@@ -13,9 +13,10 @@ import (
 )
 
 type Options struct {
-	Root    string
-	Workers int
-	Rescan  bool
+	Root       string
+	Workers    int
+	Rescan     bool
+	OnProgress func(Progress)
 }
 
 type Result struct {
@@ -23,6 +24,16 @@ type Result struct {
 	Indexed int
 	Skipped int
 	Errors  []FileError
+}
+
+type Progress struct {
+	Path    string
+	Total   int
+	Done    int
+	Scanned int
+	Indexed int
+	Skipped int
+	Errors  int
 }
 
 type FileError struct {
@@ -53,10 +64,11 @@ func Scan(ctx context.Context, db *store.DB, opts Options) (Result, error) {
 	}
 
 	go func() {
+	send:
 		for _, path := range paths {
 			select {
 			case <-ctx.Done():
-				break
+				break send
 			case jobs <- path:
 			}
 		}
@@ -66,15 +78,26 @@ func Scan(ctx context.Context, db *store.DB, opts Options) (Result, error) {
 	}()
 
 	result := Result{Scanned: len(paths)}
+	done := 0
 	for item := range results {
+		done++
 		if item.Err != nil {
 			result.Errors = append(result.Errors, FileError{Path: item.Path, Err: item.Err})
-			continue
-		}
-		if item.Skipped {
+		} else if item.Skipped {
 			result.Skipped++
 		} else {
 			result.Indexed++
+		}
+		if opts.OnProgress != nil {
+			opts.OnProgress(Progress{
+				Path:    item.Path,
+				Total:   len(paths),
+				Done:    done,
+				Scanned: result.Scanned,
+				Indexed: result.Indexed,
+				Skipped: result.Skipped,
+				Errors:  len(result.Errors),
+			})
 		}
 	}
 	return result, ctx.Err()

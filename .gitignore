@@ -2,6 +2,9 @@
 .tools/
 .imv/
 bin/
+cmd/imv-gui/build/
 tmp-fixtures/
 manual-images/
 *.exe
+gui/node_modules/
+gui/src/wailsjs/
