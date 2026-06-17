@@ -43,7 +43,7 @@ func PlanAndMaybeApply(ctx context.Context, db *store.DB, opts Options) ([]MoveP
 		return nil, err
 	}
 	safeTag := SanitizePathSegment(opts.Tag)
-	var plans []MovePlan
+	plans := make([]MovePlan, 0, len(records))
 	for _, record := range records {
 		dest := filepath.Join(opts.To, safeTag, filepath.Base(record.Path))
 		plan := MovePlan{

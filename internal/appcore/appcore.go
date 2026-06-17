@@ -315,6 +315,7 @@ func convertScanResult(result scanner.Result) ScanResult {
 		Scanned: result.Scanned,
 		Indexed: result.Indexed,
 		Skipped: result.Skipped,
+		Errors:  []FileError{},
 	}
 	for _, item := range result.Errors {
 		out.Errors = append(out.Errors, FileError{Path: item.Path, Error: item.Err.Error()})

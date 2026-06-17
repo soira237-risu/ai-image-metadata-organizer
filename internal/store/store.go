@@ -265,7 +265,7 @@ func (db *DB) Search(opts SearchOptions) ([]ImageRecord, error) {
 	}
 	defer rows.Close()
 
-	var ids []int64
+	ids := []int64{}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
@@ -280,7 +280,7 @@ func (db *DB) Search(opts SearchOptions) ([]ImageRecord, error) {
 		return nil, err
 	}
 
-	var records []ImageRecord
+	records := make([]ImageRecord, 0, len(ids))
 	for _, id := range ids {
 		record, err := db.GetByID(id, false)
 		if err != nil {
@@ -297,7 +297,7 @@ func (db *DB) Export() ([]ImageRecord, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
+	ids := []int64{}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
@@ -312,7 +312,7 @@ func (db *DB) Export() ([]ImageRecord, error) {
 		return nil, err
 	}
 
-	var records []ImageRecord
+	records := make([]ImageRecord, 0, len(ids))
 	for _, id := range ids {
 		record, err := db.GetByID(id, true)
 		if err != nil {
@@ -351,7 +351,7 @@ func (db *DB) TagsSummary(opts TagSummaryOptions) ([]TagSummary, error) {
 	}
 	defer rows.Close()
 
-	var summaries []TagSummary
+	summaries := []TagSummary{}
 	for rows.Next() {
 		var item TagSummary
 		if err := rows.Scan(&item.Tag, &item.Example, &item.Count); err != nil {
@@ -432,7 +432,7 @@ func (db *DB) tagSources(tag, sourceFilter string) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var sources []string
+	sources := []string{}
 	for rows.Next() {
 		var source string
 		if err := rows.Scan(&source); err != nil {
@@ -507,7 +507,7 @@ func (db *DB) loadMetadata(fileID int64, includeRaw bool) ([]MetadataRecord, err
 		return nil, err
 	}
 	defer rows.Close()
-	var result []MetadataRecord
+	result := []MetadataRecord{}
 	for rows.Next() {
 		var item MetadataRecord
 		var settingsJSON, workflowJSON, rawJSON string
@@ -530,7 +530,7 @@ func (db *DB) loadTags(fileID int64) ([]TagRecord, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var result []TagRecord
+	result := []TagRecord{}
 	for rows.Next() {
 		var tag TagRecord
 		if err := rows.Scan(&tag.Tag, &tag.Normalized, &tag.Source, &tag.Kind); err != nil {
@@ -562,7 +562,7 @@ func NormalizeTag(tag string) string {
 func SplitPromptTags(prompt string) []TagRecord {
 	parts := strings.Split(prompt, ",")
 	seen := map[string]bool{}
-	var tags []TagRecord
+	tags := []TagRecord{}
 	for _, part := range parts {
 		tag := strings.TrimSpace(part)
 		normalized := NormalizeTag(tag)

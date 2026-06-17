@@ -108,4 +108,21 @@ describe("App", () => {
       expect(backend.ApplyMove).toHaveBeenCalledWith({ tag: "blue hair", to: "D:\\sorted", conflict: "skip" });
     });
   });
+
+  test("keeps rendering when Wails returns null for empty lists", async () => {
+    installBackend({
+      Search: vi.fn().mockResolvedValue(null as unknown as ImageRecord[]),
+      GetTags: vi.fn().mockResolvedValue(null),
+      PlanMove: vi.fn().mockResolvedValue(null)
+    });
+    render(<App />);
+
+    expect(await screen.findByText("No indexed images")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId("move-tag-input"), { target: { value: "missing" } });
+    fireEvent.change(screen.getByTestId("move-to-input"), { target: { value: "D:\\sorted" } });
+    fireEvent.click(screen.getByText("Plan"));
+
+    expect(await screen.findByText("No move plan")).toBeInTheDocument();
+  });
 });

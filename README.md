@@ -50,9 +50,9 @@ npm run test:run
 npm run build
 cd ..
 go test ./...
-go build ./cmd/imv-gui
 wails doctor
 cd cmd/imv-gui
+wails build -m -nopackage -tags native_webview2loader -o imv-gui.exe
 wails dev
 ```
 

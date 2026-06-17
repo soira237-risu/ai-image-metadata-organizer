@@ -8,3 +8,4 @@ manual-images/
 *.exe
 gui/node_modules/
 gui/src/wailsjs/
+gui/package.json.md5
