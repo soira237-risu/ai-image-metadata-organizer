@@ -2,6 +2,7 @@ package mover
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,6 +87,89 @@ func TestApplyMovesFileUpdatesDBAndWritesLog(t *testing.T) {
 	}
 }
 
+func TestApplySkipConflictKeepsSourceAndLogsStatus(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "image.png")
+	if err := os.WriteFile(source, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	db, id := seedMoveRecord(t, dir, source)
+	destination := filepath.Join(dir, "sorted", "blue hair", "image.png")
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, ".imv", "move-log.jsonl")
+
+	plans, err := PlanAndMaybeApply(context.Background(), db, Options{
+		Tag:      "blue hair",
+		To:       filepath.Join(dir, "sorted"),
+		Apply:    true,
+		Conflict: "skip",
+		LogPath:  logPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Status != "skipped_conflict" {
+		t.Fatalf("unexpected plans: %#v", plans)
+	}
+	if data, err := os.ReadFile(source); err != nil || string(data) != "source" {
+		t.Fatalf("source should remain unchanged, data=%q err=%v", data, err)
+	}
+	record, err := db.GetByID(id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Path != source {
+		t.Fatalf("DB path should remain unchanged: %q", record.Path)
+	}
+	assertMoveLogStatus(t, logPath, "skipped_conflict")
+}
+
+func TestApplyRenameConflictMovesWithNumericSuffix(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "image.png")
+	if err := os.WriteFile(source, []byte("source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	db, id := seedMoveRecord(t, dir, source)
+	existing := filepath.Join(dir, "sorted", "blue hair", "image.png")
+	if err := os.MkdirAll(filepath.Dir(existing), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existing, []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	plans, err := PlanAndMaybeApply(context.Background(), db, Options{
+		Tag:      "blue hair",
+		To:       filepath.Join(dir, "sorted"),
+		Apply:    true,
+		Conflict: "rename",
+		LogPath:  filepath.Join(dir, ".imv", "move-log.jsonl"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "sorted", "blue hair", "image-1.png")
+	if len(plans) != 1 || plans[0].Status != "moved" || plans[0].DestinationPath != want {
+		t.Fatalf("unexpected plans: %#v want %q", plans, want)
+	}
+	if data, err := os.ReadFile(want); err != nil || string(data) != "source" {
+		t.Fatalf("renamed destination mismatch, data=%q err=%v", data, err)
+	}
+	record, err := db.GetByID(id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Path != want {
+		t.Fatalf("DB path not updated to renamed path: %q", record.Path)
+	}
+}
+
 func TestApplyRollsBackFileMoveWhenDBUpdateFails(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "image.png")
@@ -147,4 +231,21 @@ func seedMoveRecord(t *testing.T, dir, source string) (*store.DB, int64) {
 		t.Fatal(err)
 	}
 	return db, id
+}
+
+func assertMoveLogStatus(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Plan MovePlan `json:"plan"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("invalid move log json: %v\n%s", err, string(data))
+	}
+	if entry.Plan.Status != want {
+		t.Fatalf("move log status = %q, want %q", entry.Plan.Status, want)
+	}
 }

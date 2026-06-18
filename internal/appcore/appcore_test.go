@@ -76,6 +76,35 @@ func TestServiceScanSearchTagsStatsAndGetImage(t *testing.T) {
 	}
 }
 
+func TestInspectFileExtractsSingleImageWithoutDBScan(t *testing.T) {
+	dir := t.TempDir()
+	imagePath := filepath.Join(dir, "single.png")
+	if err := writePNGTextFixture(imagePath, map[string]string{
+		"Software":    "NovelAI",
+		"Description": "solo, green eyes",
+		"Comment":     `{"uc":"low quality","seed":456}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := InspectFile(context.Background(), imagePath, true, 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Record.Path != imagePath || detail.Record.ID != 0 {
+		t.Fatalf("unexpected record: %#v", detail.Record)
+	}
+	if !strings.HasPrefix(detail.PreviewDataURL, "data:image/png;base64,") {
+		t.Fatalf("missing preview: %q", detail.PreviewDataURL)
+	}
+	if len(detail.Record.Tags) == 0 || detail.Record.Tags[0].Tag != "solo" {
+		t.Fatalf("unexpected tags: %#v", detail.Record.Tags)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".imv", "imv.db")); !os.IsNotExist(err) {
+		t.Fatalf("InspectFile should not create DB, err=%v", err)
+	}
+}
+
 func TestServiceExportWritesStableJSON(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, ".imv", "imv.db")
@@ -179,6 +208,13 @@ func TestServiceMoveDryRunAndApply(t *testing.T) {
 	}
 	if record.Path != applied[0].DestinationPath {
 		t.Fatalf("DB path not updated: %q", record.Path)
+	}
+	records, err := service.Search(context.Background(), SearchRequest{Tag: "blue hair", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Path != applied[0].DestinationPath {
+		t.Fatalf("search did not return moved path: %#v", records)
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, ".imv", "move-log.jsonl")); err != nil || len(data) == 0 {
 		t.Fatalf("move log missing len=%d err=%v", len(data), err)

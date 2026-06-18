@@ -23,6 +23,11 @@ function backend(): BackendAPI {
 
 const unavailableBackend: BackendAPI = {
   OpenFolder: unavailable,
+  OpenFile: unavailable,
+  Reset: unavailable,
+  RevealFolder: unavailable,
+  InspectFile: unavailable,
+  PreviewPath: unavailable,
   State: unavailable,
   ScanFolder: unavailable,
   Search: unavailable,
@@ -40,6 +45,26 @@ function unavailable(): Promise<never> {
 
 export function openFolder(): Promise<FolderState> {
   return backend().OpenFolder();
+}
+
+export function openFile(): Promise<FolderState> {
+  return backend().OpenFile();
+}
+
+export function resetSession(): Promise<FolderState> {
+  return backend().Reset();
+}
+
+export function revealFolder(path: string): Promise<void> {
+  return backend().RevealFolder(path);
+}
+
+export function inspectFile(path: string): Promise<ImageDetail> {
+  return backend().InspectFile(path);
+}
+
+export function previewPath(path: string): Promise<string> {
+  return backend().PreviewPath(path);
 }
 
 export function getState(): Promise<FolderState> {

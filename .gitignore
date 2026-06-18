@@ -1,4 +1,6 @@
 .cache/
+.gocache/
+.gomodcache/
 .tools/
 .imv/
 bin/

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"imv/internal/metadata"
 	"imv/internal/mover"
 	"imv/internal/scanner"
 	"imv/internal/store"
@@ -188,6 +189,48 @@ func (s *Service) GetImage(ctx context.Context, req GetImageRequest) (ImageDetai
 	return detail, nil
 }
 
+func InspectFile(ctx context.Context, path string, includePreview bool, previewMaxBytes int64) (ImageDetail, error) {
+	_ = ctx
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ImageDetail{}, fmt.Errorf("image path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ImageDetail{}, err
+	}
+	if info.IsDir() {
+		return ImageDetail{}, fmt.Errorf("image path must be a file")
+	}
+	extracted, err := metadata.ExtractFile(path)
+	if err != nil {
+		return ImageDetail{}, err
+	}
+	record := store.ImageRecord{
+		Path:     path,
+		Format:   extracted.Format,
+		Size:     info.Size(),
+		MTime:    info.ModTime().UnixNano(),
+		Width:    extracted.Width,
+		Height:   extracted.Height,
+		Metadata: metadataRecords(extracted.Metadata),
+		Tags:     tagRecords(extracted.Tags),
+	}
+	detail := ImageDetail{Record: record}
+	if includePreview {
+		limit := previewMaxBytes
+		if limit <= 0 {
+			limit = DefaultPreviewMaxBytes
+		}
+		preview, err := PreviewDataURL(path, limit)
+		if err != nil {
+			return ImageDetail{}, err
+		}
+		detail.PreviewDataURL = preview
+	}
+	return detail, nil
+}
+
 func (s *Service) Tags(ctx context.Context, req TagsRequest) ([]store.TagSummary, error) {
 	db, err := s.open()
 	if err != nil {
@@ -355,4 +398,32 @@ func marshal(v any, pretty bool) ([]byte, error) {
 		return json.MarshalIndent(v, "", "  ")
 	}
 	return json.Marshal(v)
+}
+
+func metadataRecords(items []metadata.Record) []store.MetadataRecord {
+	out := make([]store.MetadataRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, store.MetadataRecord{
+			Source:          string(item.Source),
+			PositivePrompt:  item.PositivePrompt,
+			NegativePrompt:  item.NegativePrompt,
+			Settings:        item.Settings,
+			WorkflowSummary: item.WorkflowSummary,
+			Raw:             item.Raw,
+		})
+	}
+	return out
+}
+
+func tagRecords(items []metadata.ImageTag) []store.TagRecord {
+	out := make([]store.TagRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, store.TagRecord{
+			Tag:        item.Value,
+			Normalized: item.Normalized,
+			Source:     string(item.Source),
+			Kind:       item.Kind,
+		})
+	}
+	return out
 }

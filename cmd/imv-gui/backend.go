@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -19,11 +21,13 @@ type Backend struct {
 	mu     sync.Mutex
 	folder string
 	dbPath string
+	file   string
 }
 
 type FolderState struct {
-	Folder string `json:"folder"`
-	DBPath string `json:"db_path"`
+	Folder       string `json:"folder"`
+	DBPath       string `json:"db_path"`
+	SelectedPath string `json:"selected_path,omitempty"`
 }
 
 type ExportResult struct {
@@ -41,7 +45,7 @@ func (b *Backend) startup(ctx context.Context) {
 
 func (b *Backend) OpenFolder() (FolderState, error) {
 	folder, err := wailsruntime.OpenDirectoryDialog(b.ctx, wailsruntime.OpenDialogOptions{
-		Title: "Open image folder",
+		Title: "이미지 폴더 열기",
 	})
 	if err != nil {
 		return FolderState{}, err
@@ -52,10 +56,36 @@ func (b *Backend) OpenFolder() (FolderState, error) {
 	return b.useFolder(folder), nil
 }
 
+func (b *Backend) OpenFile() (FolderState, error) {
+	path, err := wailsruntime.OpenFileDialog(b.ctx, wailsruntime.OpenDialogOptions{
+		Title: "이미지 파일 열기",
+		Filters: []wailsruntime.FileFilter{{
+			DisplayName: "PNG/WebP images (*.png;*.webp)",
+			Pattern:     "*.png;*.webp",
+		}},
+	})
+	if err != nil {
+		return FolderState{}, err
+	}
+	if strings.TrimSpace(path) == "" {
+		return b.State(), nil
+	}
+	return b.useFile(path), nil
+}
+
+func (b *Backend) Reset() FolderState {
+	b.mu.Lock()
+	b.folder = ""
+	b.file = ""
+	b.dbPath = appcore.DefaultDBPath
+	b.mu.Unlock()
+	return FolderState{DBPath: appcore.DefaultDBPath}
+}
+
 func (b *Backend) State() FolderState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return FolderState{Folder: b.folder, DBPath: b.dbPath}
+	return FolderState{Folder: b.folder, DBPath: b.dbPath, SelectedPath: b.file}
 }
 
 func (b *Backend) ScanFolder(folder string, rescan bool) (appcore.ScanResult, error) {
@@ -103,6 +133,14 @@ func (b *Backend) GetImage(req appcore.GetImageRequest) (appcore.ImageDetail, er
 	return b.service().GetImage(context.Background(), req)
 }
 
+func (b *Backend) InspectFile(path string) (appcore.ImageDetail, error) {
+	return appcore.InspectFile(context.Background(), path, true, appcore.DefaultPreviewMaxBytes)
+}
+
+func (b *Backend) PreviewPath(path string) (string, error) {
+	return appcore.PreviewDataURL(path, appcore.DefaultPreviewMaxBytes)
+}
+
 func (b *Backend) GetTags(req appcore.TagsRequest) ([]store.TagSummary, error) {
 	return b.service().Tags(context.Background(), req)
 }
@@ -145,6 +183,25 @@ func (b *Backend) ExportJSON(out string, pretty bool) (ExportResult, error) {
 	return ExportResult{Path: out, Count: len(records)}, nil
 }
 
+func (b *Backend) RevealFolder(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("folder path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		path = filepath.Dir(path)
+	}
+	name, args, err := revealCommand(runtime.GOOS, path)
+	if err != nil {
+		return err
+	}
+	return exec.Command(name, args...).Start()
+}
+
 func (b *Backend) useFolder(folder string) FolderState {
 	state := FolderState{
 		Folder: folder,
@@ -153,6 +210,21 @@ func (b *Backend) useFolder(folder string) FolderState {
 	b.mu.Lock()
 	b.folder = state.Folder
 	b.dbPath = state.DBPath
+	b.file = ""
+	b.mu.Unlock()
+	return state
+}
+
+func (b *Backend) useFile(path string) FolderState {
+	state := FolderState{
+		Folder:       filepath.Dir(path),
+		DBPath:       appcore.DBPathForFolder(filepath.Dir(path)),
+		SelectedPath: path,
+	}
+	b.mu.Lock()
+	b.folder = state.Folder
+	b.dbPath = state.DBPath
+	b.file = state.SelectedPath
 	b.mu.Unlock()
 	return state
 }
@@ -162,4 +234,17 @@ func (b *Backend) service() *appcore.Service {
 	dbPath := b.dbPath
 	b.mu.Unlock()
 	return appcore.New(dbPath)
+}
+
+func revealCommand(goos, path string) (string, []string, error) {
+	switch goos {
+	case "windows":
+		return "explorer", []string{path}, nil
+	case "darwin":
+		return "open", []string{path}, nil
+	case "linux":
+		return "xdg-open", []string{path}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported platform %q", goos)
+	}
 }
