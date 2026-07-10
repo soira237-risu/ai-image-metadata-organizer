@@ -78,7 +78,7 @@ describe("App", () => {
   test("renders the public product identity in the header", async () => {
     render(<App />);
 
-    expect(await screen.findByTitle("AI Image Metadata Organizer")).toHaveTextContent("IMV");
+    expect(await screen.findByTitle("AI Image Metadata Organizer (IMV)")).toHaveTextContent("IMV");
   });
 
   test("sends search filters to the backend", async () => {
