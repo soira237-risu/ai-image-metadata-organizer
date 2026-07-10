@@ -84,7 +84,12 @@ Run Wails commands from `cmd/imv-gui`. Build the frontend first, then create the
 Set-Location .\cmd\imv-gui
 wails doctor
 wails build -m -nopackage -tags native_webview2loader -o imv-gui.exe
+.\build\bin\imv-gui.exe
 ```
+
+빌드가 끝나면 같은 `cmd/imv-gui` 디렉터리에서 `.\build\bin\imv-gui.exe`로 GUI를 실행합니다.
+
+After the build finishes, launch the GUI from the same `cmd/imv-gui` directory with `.\build\bin\imv-gui.exe`.
 
 개발 중에는 같은 디렉터리에서 `wails dev`를 사용할 수 있습니다.
 
