@@ -1,57 +1,50 @@
 # AI Image Metadata Organizer (IMV)
 
-NovelAI 이미지의 메타데이터를 로컬 우선 방식으로 살펴보고 prompt tag로 파일을 정리하는 NovelAI-first 도구입니다. ComfyUI workflow 요약과 일반적인 AI PNG/WebP 메타데이터도 함께 지원합니다.
+NovelAI 이미지를 먼저 지원하는 로컬 이미지 메타데이터 정리 도구입니다. PNG/WebP에서 prompt, negative prompt, 설정값과 태그를 읽고 검색하며, 확인한 계획에 따라 안전하게 파일을 정리합니다. ComfyUI workflow 요약도 지원합니다.
 
-This local-first tool inspects NovelAI image metadata and organizes files by prompt tags. It also supports ComfyUI workflow summaries and generic AI metadata in PNG/WebP files.
+NovelAI-first local image metadata organizer for prompt/tag search, ComfyUI workflow summaries, and safe PNG/WebP file organization.
 
-## 핵심 흐름 / Core Flow
+![IMV workflow: open image, read metadata, sort tags, confirm the move](assets/imv-illustrations/01-safe-metadata-flow.png)
 
-`이미지 열기 -> 메타데이터 추출 -> 태그 검색 -> 이동 계획 -> 확인 후 이동`
+`이미지 열기 -> 메타데이터 읽기 -> 태그 검색 -> 이동 계획 -> 확인 후 이동`
 
-Open an image, extract metadata, search tags, create a move plan, review it, and then apply the move.
+## 바로 시작하기
 
-## 주요 기능 / Features
-
-- NovelAI prompt, negative prompt, 설정값, prompt tag 추출 / NovelAI prompt, negative prompt, settings, and prompt-tag extraction
-- ComfyUI workflow 요약 및 일반 PNG/WebP 메타데이터 지원 / ComfyUI workflow summaries and generic PNG/WebP metadata
-- PNG/WebP 파일을 재귀적으로 스캔하고 로컬 SQLite 인덱스에 저장 / Recursive PNG/WebP scanning into a local SQLite index
-- CLI 자동화와 Wails 데스크톱 GUI 제공 / CLI automation and a Wails desktop GUI
-- CLI `move`는 기본적으로 dry-run이며 `--apply`가 있어야 파일을 이동합니다 / CLI `move` is a dry-run by default and requires `--apply` to move files
-- GUI는 이동 계획을 만든 뒤 명시적으로 확인해야 실제 이동을 실행합니다 / GUI requires a move plan and explicit confirmation before applying moves
-
-## 프로젝트 메타데이터 / Project Metadata
-
-GitHub description:
-
-> NovelAI-first local image metadata organizer with prompt/tag search, ComfyUI support, and safe PNG/WebP file organization.
-
-Repository: <https://github.com/soira237-risu/ai-image-metadata-organizer>
-
-## 사전 요구사항 / Prerequisites
-
-- Windows PowerShell
-- Go 1.22+
-- Node `^20.19.0 || >=22.12.0`
-- Wails v2
-
-이 저장소는 미리 빌드된 바이너리를 배포하지 않습니다. 소스 코드를 clone한 뒤 직접 빌드하세요.
-
-No binaries are published. Clone the source repository and build locally.
-
-## 설치와 빌드 / Install and Build
-
-### 소스 받기 / Clone
+필요한 것: Windows PowerShell, Go 1.22+, Node `^20.19.0 || >=22.12.0`, Wails v2.
 
 ```powershell
 git clone https://github.com/soira237-risu/ai-image-metadata-organizer.git
 Set-Location .\ai-image-metadata-organizer
+
+go build -o .\bin\imv.exe .\cmd\imv
+.\bin\imv.exe scan "C:\Path\To\NovelAI-Images" --db .\.imv\imv.db
+.\bin\imv.exe search --tag "blue hair" --db .\.imv\imv.db
 ```
 
-### CLI 빌드 / Build the CLI
+GUI를 빌드하고 실행하려면:
 
-저장소 루트에서 실행합니다. `bin\imv.exe`가 생성됩니다.
+```powershell
+Set-Location .\cmd\imv-gui
+wails build -m -nopackage -tags native_webview2loader -o imv-gui.exe
+.\build\bin\imv-gui.exe
+```
 
-Run from the repository root. This creates `bin\imv.exe`.
+## 할 수 있는 일
+
+- NovelAI prompt, negative prompt, 설정값, 태그 추출
+- ComfyUI workflow 요약과 일반 PNG/WebP 메타데이터 확인
+- 폴더 스캔, 태그/텍스트 검색, 통계, JSON 내보내기
+- CLI 자동화와 Wails 데스크톱 GUI
+- 태그를 기준으로 한 폴더 생성과 파일 이동
+
+> 파일 이동은 안전하게 시작합니다. CLI `move`는 기본 dry-run이며, 실제 이동에는 `--apply`가 필요합니다. GUI도 이동 계획을 확인한 뒤에만 실행합니다.
+
+<details>
+<summary><strong>상세 설치와 사용법</strong></summary>
+
+### CLI 검증과 빌드
+
+저장소 루트에서 실행합니다.
 
 ```powershell
 go mod download
@@ -60,50 +53,31 @@ go build -o .\bin\imv.exe .\cmd\imv
 .\bin\imv.exe help
 ```
 
-### GUI 프런트엔드 / Build the frontend
+### GUI 개발과 빌드
 
-프런트엔드 명령은 `gui` 디렉터리에서 실행합니다. `npm run build`는 Wails가 임베드할 `cmd/imv-gui/frontend/dist`를 갱신합니다.
+Wails가 아직 없다면 먼저 설치하고, 현재 PowerShell 세션의 PATH에 추가합니다.
 
-Run frontend commands from `gui`. `npm run build` updates `cmd/imv-gui/frontend/dist`, which Wails embeds.
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+$env:Path += ";$(go env GOPATH)\bin"
+```
+
+Wails 빌드는 프런트엔드 의존성 설치와 빌드를 함께 수행합니다. 프런트엔드만 확인할 때는 아래 명령을 사용합니다.
 
 ```powershell
 Set-Location .\gui
 npm install
 npm run test:run
 npm run build
-Set-Location ..
-```
-
-### Wails 빌드 / Build with Wails
-
-Wails 명령은 `cmd/imv-gui` 디렉터리에서 실행합니다. 프런트엔드를 먼저 빌드한 뒤 실행 파일을 만드세요.
-
-Run Wails commands from `cmd/imv-gui`. Build the frontend first, then create the desktop executable.
-
-```powershell
-Set-Location .\cmd\imv-gui
+Set-Location ..\cmd\imv-gui
 wails doctor
 wails build -m -nopackage -tags native_webview2loader -o imv-gui.exe
 .\build\bin\imv-gui.exe
 ```
 
-빌드가 끝나면 같은 `cmd/imv-gui` 디렉터리에서 `.\build\bin\imv-gui.exe`로 GUI를 실행합니다.
+개발 중에는 `cmd\imv-gui`에서 `wails dev`를 실행합니다.
 
-After the build finishes, launch the GUI from the same `cmd/imv-gui` directory with `.\build\bin\imv-gui.exe`.
-
-개발 중에는 같은 디렉터리에서 `wails dev`를 사용할 수 있습니다.
-
-During development, run `wails dev` from the same directory.
-
-```powershell
-wails dev
-```
-
-## CLI 사용 / CLI Usage
-
-CLI는 저장소 루트에서 `.\bin\imv.exe`로 실행합니다. 먼저 이미지 폴더를 스캔하세요.
-
-Run the CLI from the repository root as `.\bin\imv.exe`. Start by scanning an image folder.
+### CLI 예시
 
 ```powershell
 $images = "C:\Path\To\NovelAI-Images"
@@ -113,55 +87,29 @@ $images = "C:\Path\To\NovelAI-Images"
 .\bin\imv.exe export --out .\imv-export.json --pretty --db .\.imv\imv.db
 ```
 
-`move`는 먼저 계획만 출력합니다. 출력된 source와 destination을 확인한 뒤에만 `--apply`를 추가하세요.
-
-`move` prints a plan first. Review every source and destination, then add `--apply` only when the plan is correct.
+이동은 먼저 계획만 출력합니다. source와 destination을 확인한 뒤에만 `--apply`를 추가하세요.
 
 ```powershell
 .\bin\imv.exe move --tag "1girl" --to "C:\Path\To\Organized" --db .\.imv\imv.db
 .\bin\imv.exe move --tag "1girl" --to "C:\Path\To\Organized" --conflict rename --apply --db .\.imv\imv.db
 ```
 
-## GUI 사용 / GUI Usage
+전체 명령과 옵션은 다음으로 확인합니다.
 
-GUI에서는 `파일 열기`로 PNG/WebP 하나를 바로 확인하거나 `폴더 열기`로 폴더를 스캔할 수 있습니다. 폴더를 열면 검색, 태그 요약, 통계, JSON 내보내기를 사용할 수 있습니다.
-
-In the GUI, use `파일 열기` to inspect one PNG/WebP or `폴더 열기` to scan a folder. Folder mode provides search, tag summaries, statistics, and JSON export.
-
-이동은 `이동 태그`와 `대상 폴더`를 입력해 `계획`을 만든 뒤, 결과를 확인하고 `이동 실행`을 명시적으로 눌러야 합니다. 계획 확인 전에는 파일이 이동되지 않습니다.
-
-For a move, enter `이동 태그` and `대상 폴더`, create a `계획`, review its results, and explicitly press `이동 실행`. No files move before the plan is confirmed.
-
-## 지원 명령 / Supported Commands
-
-```text
-imv scan <folder> [--db .imv/imv.db] [--workers 4] [--rescan] [--json]
-imv show <path-or-id> [--db .imv/imv.db] [--raw] [--json]
-imv search [--db .imv/imv.db] [--tag <tag>] [--source <source>] [--format png|webp] [--has-workflow] [--q <text>] [--limit 50] [--long] [--json]
-imv tags [--db .imv/imv.db] [--source <source>] [--q <text>] [--limit 100] [--json]
-imv stats [--db .imv/imv.db] [--json]
-imv export [--db .imv/imv.db] --out <file.json> [--pretty]
-imv move [--db .imv/imv.db] --tag <tag> --to <folder> [--apply] [--conflict skip|rename] [--json]
+```powershell
+.\bin\imv.exe help
 ```
 
-`source` 값은 메타데이터 종류에 따라 `nai`, `comfyui`, `generic`, `unknown`을 사용합니다. `format` 값은 `png` 또는 `webp`입니다.
+### GUI 사용
 
-Use `nai`, `comfyui`, `generic`, or `unknown` for `source`. Use `png` or `webp` for `format`.
+`파일 열기`는 PNG/WebP 한 장을 바로 확인합니다. `폴더 열기`는 폴더를 스캔해 검색, 태그 요약, 통계, JSON 내보내기를 제공합니다.
 
-## 구조 / Architecture
+파일 이동은 `이동 태그`와 `대상 폴더`를 입력한 뒤 `계획`을 만들고, 결과를 확인한 후 `이동 실행`을 눌러야 합니다.
 
-- `cmd/imv`: CLI 진입점 / CLI entry point
-- `cmd/imv-gui`: Wails 백엔드와 데스크톱 진입점 / Wails backend and desktop entry point
-- `internal/appcore`: CLI와 GUI가 공유하는 스캔, 검색, 표시, 태그, 통계, 내보내기, 이동 서비스 / Shared scan, search, show, tag, stats, export, and move services
-- `internal/metadata`: NovelAI, ComfyUI, 일반 PNG/WebP 메타데이터 추출 / NovelAI, ComfyUI, and generic PNG/WebP extraction
-- `internal/scanner`: 이미지 파일 스캔 / Image-file scanning
-- `internal/store`: SQLite 인덱스와 `.imv/imv.db` 관리 / SQLite index and `.imv/imv.db` management
-- `internal/mover`: 계획 생성, 충돌 처리, 적용, 이동 로그 / Planning, conflict handling, application, and move logs
-- `gui`: React + TypeScript + Vite 소스 / React + TypeScript + Vite source
-- `cmd/imv-gui/frontend/dist`: Wails에 임베드되는 생성된 프런트엔드 에셋 / Generated frontend assets embedded by Wails
+</details>
 
-## 기여와 보안 / Contributing and Security
+## 기여와 보안
 
-기여 방법은 [CONTRIBUTING.md](CONTRIBUTING.md), AI 코딩 에이전트 지침은 [AGENTS.md](AGENTS.md), 보안 문제 신고는 [SECURITY.md](SECURITY.md)를 참고하세요. 라이선스는 [MIT](LICENSE)입니다.
+[CONTRIBUTING.md](CONTRIBUTING.md)에서 기여 방법을, [AGENTS.md](AGENTS.md)에서 AI 작업 규칙을, [SECURITY.md](SECURITY.md)에서 비공개 보안 신고 방법을 확인하세요.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contributions, [AGENTS.md](AGENTS.md) for AI coding agents, and [SECURITY.md](SECURITY.md) for security reports. This project is licensed under the [MIT License](LICENSE).
+MIT License. No executables or private AI artwork are distributed with this repository.
