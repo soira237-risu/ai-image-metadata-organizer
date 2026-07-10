@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"imv/internal/appcore"
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/appcore"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )

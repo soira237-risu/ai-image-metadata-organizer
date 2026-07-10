@@ -1,4 +1,4 @@
-module imv
+module github.com/soira237-risu/ai-image-metadata-organizer
 
 go 1.22.0
 

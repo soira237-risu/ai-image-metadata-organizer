@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"imv/internal/metadata"
-	"imv/internal/mover"
-	"imv/internal/scanner"
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/metadata"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/mover"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/scanner"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
 
 const (

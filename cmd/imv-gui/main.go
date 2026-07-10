@@ -15,7 +15,7 @@ var assets embed.FS
 func main() {
 	backend := NewBackend()
 	err := wails.Run(&options.App{
-		Title:     "imv",
+		Title:     "AI Image Metadata Organizer (IMV)",
 		Width:     1280,
 		Height:    820,
 		MinWidth:  960,

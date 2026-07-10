@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
 
 func TestParseInterspersedAllowsFlagsAfterPositional(t *testing.T) {
@@ -29,6 +29,18 @@ func TestParseInterspersedAllowsFlagsAfterPositional(t *testing.T) {
 	}
 	if *db != "custom.db" || !*rescan {
 		t.Fatalf("unexpected flags: db=%q rescan=%v", *db, *rescan)
+	}
+}
+
+func TestHelpUsesPublicProductIdentity(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	if err := runWithIO([]string{"help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("help failed: %v", err)
+	}
+
+	if got, want := strings.SplitN(stdout.String(), "\n", 2)[0], "imv - NovelAI-first AI image metadata organizer"; got != want {
+		t.Fatalf("help heading = %q, want %q", got, want)
 	}
 }
 

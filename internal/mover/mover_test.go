@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
 
 func TestSanitizePathSegmentReplacesInvalidCharacters(t *testing.T) {

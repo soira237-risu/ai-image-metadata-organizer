@@ -11,8 +11,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"imv/internal/appcore"
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/appcore"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
 
 const defaultDBPath = appcore.DefaultDBPath
@@ -294,7 +294,7 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func printUsage(stdout io.Writer) {
-	fmt.Fprintln(stdout, strings.TrimSpace(`imv - AI image metadata indexer
+	fmt.Fprintln(stdout, strings.TrimSpace(`imv - NovelAI-first AI image metadata organizer
 
 Commands:
   scan    index PNG/WebP files

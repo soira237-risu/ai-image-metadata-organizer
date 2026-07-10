@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
 
 func TestServiceScanSearchTagsStatsAndGetImage(t *testing.T) {

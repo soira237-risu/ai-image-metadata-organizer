@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"imv/internal/metadata"
-	"imv/internal/store"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/metadata"
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
 
 type Options struct {

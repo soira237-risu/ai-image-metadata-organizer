@@ -437,7 +437,7 @@ export default function App() {
     >
       <header className="toolbar">
         <div className="brand">
-          <strong>imv</strong>
+          <strong title="AI Image Metadata Organizer">IMV</strong>
           <span>{shortPath(folderState.folder) || "불러온 폴더 없음"}</span>
         </div>
         <div className="toolbar-actions">
