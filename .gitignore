@@ -1,4 +1,7 @@
 .cache/
+.gocache/
+.gomodcache/
+.npm-cache/
 .tools/
 .imv/
 bin/
@@ -7,4 +10,5 @@ tmp-fixtures/
 manual-images/
 *.exe
 gui/node_modules/
+gui/package.json.md5
 gui/src/wailsjs/

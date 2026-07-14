@@ -25,6 +25,24 @@ type Service struct {
 	MoveLogPath string
 }
 
+type atomicFileOps struct {
+	createTemp func(string, string) (*os.File, error)
+	replace    func(string, string) error
+	remove     func(string) error
+	mkdirAll   func(string, os.FileMode) error
+	chmod      func(string, os.FileMode) error
+}
+
+func defaultAtomicFileOps() atomicFileOps {
+	return atomicFileOps{
+		createTemp: os.CreateTemp,
+		replace:    replaceFile,
+		remove:     os.Remove,
+		mkdirAll:   os.MkdirAll,
+		chmod:      os.Chmod,
+	}
+}
+
 type ScanRequest struct {
 	Root    string `json:"root"`
 	Workers int    `json:"workers"`
@@ -150,8 +168,7 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) ([]store.ImageR
 		return nil, err
 	}
 	defer db.Close()
-	_ = ctx
-	return db.Search(store.SearchOptions{
+	return db.Search(ctx, store.SearchOptions{
 		Tag:         req.Tag,
 		Source:      req.Source,
 		Query:       req.Query,
@@ -167,9 +184,7 @@ func (s *Service) GetImage(ctx context.Context, req GetImageRequest) (ImageDetai
 		return ImageDetail{}, err
 	}
 	defer db.Close()
-	_ = ctx
-
-	record, err := getRecord(db, req)
+	record, err := getRecord(ctx, db, req)
 	if err != nil {
 		return ImageDetail{}, err
 	}
@@ -194,8 +209,7 @@ func (s *Service) Tags(ctx context.Context, req TagsRequest) ([]store.TagSummary
 		return nil, err
 	}
 	defer db.Close()
-	_ = ctx
-	return db.TagsSummary(store.TagSummaryOptions{
+	return db.TagsSummary(ctx, store.TagSummaryOptions{
 		Source: req.Source,
 		Query:  req.Query,
 		Limit:  req.Limit,
@@ -208,8 +222,7 @@ func (s *Service) Stats(ctx context.Context) (store.Stats, error) {
 		return store.Stats{}, err
 	}
 	defer db.Close()
-	_ = ctx
-	return db.Stats()
+	return db.Stats(ctx)
 }
 
 func (s *Service) Export(ctx context.Context, req ExportRequest) ([]store.ImageRecord, error) {
@@ -218,9 +231,7 @@ func (s *Service) Export(ctx context.Context, req ExportRequest) ([]store.ImageR
 		return nil, err
 	}
 	defer db.Close()
-	_ = ctx
-
-	records, err := db.Export()
+	records, err := db.Export(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -231,13 +242,50 @@ func (s *Service) Export(ctx context.Context, req ExportRequest) ([]store.ImageR
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(req.Out), 0755); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(req.Out, data, 0644); err != nil {
+	if err := writeFileAtomically(req.Out, data, 0644); err != nil {
 		return nil, err
 	}
 	return records, nil
+}
+
+func writeFileAtomically(path string, data []byte, mode os.FileMode) error {
+	return writeFileAtomicallyWithFS(path, data, mode, defaultAtomicFileOps())
+}
+
+func writeFileAtomicallyWithFS(path string, data []byte, mode os.FileMode, ops atomicFileOps) error {
+	dir := filepath.Dir(path)
+	if err := ops.mkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	temp, err := ops.createTemp(dir, ".imv-export-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	keepTemp := true
+	defer func() {
+		_ = temp.Close()
+		if keepTemp {
+			_ = ops.remove(tempPath)
+		}
+	}()
+	if _, err := temp.Write(data); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := ops.chmod(tempPath, mode); err != nil {
+		return err
+	}
+	if err := ops.replace(tempPath, path); err != nil {
+		return err
+	}
+	keepTemp = false
+	return nil
 }
 
 func (s *Service) PlanMove(ctx context.Context, req MoveRequest) ([]MovePlan, error) {
@@ -322,20 +370,20 @@ func convertScanResult(result scanner.Result) ScanResult {
 	return out
 }
 
-func getRecord(db *store.DB, req GetImageRequest) (store.ImageRecord, error) {
+func getRecord(ctx context.Context, db *store.DB, req GetImageRequest) (store.ImageRecord, error) {
 	if req.ID > 0 {
-		return db.GetByID(req.ID, req.IncludeRaw)
+		return db.GetByID(ctx, req.ID, req.IncludeRaw)
 	}
 	if strings.TrimSpace(req.Path) != "" {
-		return db.GetByPath(req.Path, req.IncludeRaw)
+		return db.GetByPath(ctx, req.Path, req.IncludeRaw)
 	}
 	if strings.TrimSpace(req.Ref) == "" {
 		return store.ImageRecord{}, fmt.Errorf("image reference is required")
 	}
 	if id, err := strconv.ParseInt(req.Ref, 10, 64); err == nil {
-		return db.GetByID(id, req.IncludeRaw)
+		return db.GetByID(ctx, id, req.IncludeRaw)
 	}
-	return db.GetByPath(req.Ref, req.IncludeRaw)
+	return db.GetByPath(ctx, req.Ref, req.IncludeRaw)
 }
 
 func imageMIME(path string) (string, error) {

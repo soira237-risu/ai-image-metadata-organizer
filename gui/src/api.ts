@@ -25,12 +25,20 @@ export function openFolder(): Promise<FolderState> {
   return backend().OpenFolder();
 }
 
+export function chooseDestinationFolder(): Promise<string> {
+  return backend().ChooseDestinationFolder();
+}
+
 export function getState(): Promise<FolderState> {
   return backend().State();
 }
 
 export function scanFolder(folder: string, rescan: boolean): Promise<ScanResult> {
   return backend().ScanFolder(folder, rescan);
+}
+
+export function cancelScan(): Promise<boolean> {
+  return backend().CancelScan();
 }
 
 export function search(req: SearchRequest): Promise<ImageRecord[]> {

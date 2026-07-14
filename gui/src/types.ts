@@ -107,8 +107,10 @@ export type ExportResult = {
 
 export type BackendAPI = {
   OpenFolder(): Promise<FolderState>;
+  ChooseDestinationFolder(): Promise<string>;
   State(): Promise<FolderState>;
   ScanFolder(folder: string, rescan: boolean): Promise<ScanResult>;
+  CancelScan(): Promise<boolean>;
   Search(req: SearchRequest): Promise<ImageRecord[]>;
   GetImage(req: { id?: number; path?: string; ref?: string; include_raw?: boolean; include_preview?: boolean; preview_max_bytes?: number }): Promise<ImageDetail>;
   GetTags(req: TagsRequest): Promise<TagSummary[]>;
@@ -119,7 +121,7 @@ export type BackendAPI = {
 };
 
 export type WailsRuntime = {
-  EventsOn?: (eventName: string, callback: (...args: unknown[]) => void) => void;
+  EventsOn?: (eventName: string, callback: (...args: unknown[]) => void) => () => void;
 };
 
 declare global {

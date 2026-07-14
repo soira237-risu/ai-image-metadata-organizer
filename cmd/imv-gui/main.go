@@ -23,7 +23,8 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		OnStartup: backend.startup,
+		OnStartup:  backend.startup,
+		OnShutdown: backend.shutdown,
 		Bind: []interface{}{
 			backend,
 		},
@@ -32,7 +33,7 @@ func main() {
 			CSSDropProperty: "--wails-drop-target",
 			CSSDropValue:    "drop",
 		},
-		BackgroundColour: &options.RGBA{R: 246, G: 247, B: 249, A: 255},
+		BackgroundColour: &options.RGBA{R: 250, G: 247, B: 242, A: 255},
 	})
 	if err != nil {
 		log.Fatal(err)

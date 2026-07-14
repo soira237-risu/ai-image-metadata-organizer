@@ -77,10 +77,11 @@ func Scan(ctx context.Context, db *store.DB, opts Options) (Result, error) {
 		close(results)
 	}()
 
-	result := Result{Scanned: len(paths)}
+	result := Result{}
 	done := 0
 	for item := range results {
 		done++
+		result.Scanned++
 		if item.Err != nil {
 			result.Errors = append(result.Errors, FileError{Path: item.Path, Err: item.Err})
 		} else if item.Skipped {
@@ -134,7 +135,7 @@ func scanOne(ctx context.Context, db *store.DB, path string, rescan bool) worker
 	}
 	mtime := info.ModTime().UnixNano()
 	if !rescan {
-		unchanged, err := db.IsUnchanged(path, info.Size(), mtime)
+		unchanged, err := db.IsUnchanged(ctx, path, info.Size(), mtime)
 		if err != nil {
 			return workerResult{Path: path, Err: err}
 		}

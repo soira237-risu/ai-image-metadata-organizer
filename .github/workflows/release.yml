@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-amd64:
+    name: Build Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: gui
+        run: npm ci
+
+      - name: Verify frontend
+        working-directory: gui
+        run: |
+          npm run typecheck
+          npm run test:run
+          npm run build
+
+      - name: Verify Go code
+        run: |
+          go test -count=1 ./...
+          go vet ./...
+
+      - name: Build and package executables
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.ref_name }}'
+          $archiveName = "imv-$tag-windows-amd64"
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE 'release'
+          $stageDirectory = Join-Path $env:RUNNER_TEMP $archiveName
+
+          New-Item -ItemType Directory -Force -Path $releaseDirectory | Out-Null
+          New-Item -ItemType Directory -Force -Path $stageDirectory | Out-Null
+
+          go build -trimpath -ldflags "-s -w" -o (Join-Path $stageDirectory 'imv.exe') ./cmd/imv
+          go build -trimpath -tags native_webview2loader -ldflags "-s -w -H=windowsgui" -o (Join-Path $stageDirectory 'imv-gui.exe') ./cmd/imv-gui
+
+          Copy-Item -LiteralPath 'README.md' -Destination $stageDirectory
+          if (Test-Path -LiteralPath 'LICENSE') {
+            Copy-Item -LiteralPath 'LICENSE' -Destination $stageDirectory
+          }
+
+          $archivePath = Join-Path $releaseDirectory "$archiveName.zip"
+          Compress-Archive -Path (Join-Path $stageDirectory '*') -DestinationPath $archivePath -CompressionLevel Optimal
+
+          $checksumPath = "$archivePath.sha256"
+          $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumLine = "$hash  $(Split-Path -Leaf $archivePath)"
+          Set-Content -LiteralPath $checksumPath -Value $checksumLine -Encoding ascii -NoNewline
+
+          "archive=$archivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "checksum=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: imv-${{ github.ref_name }}-windows-amd64
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = '${{ github.ref_name }}'
+          $archive = '${{ steps.package.outputs.archive }}'
+          $checksum = '${{ steps.package.outputs.checksum }}'
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $archive $checksum --clobber
+          } else {
+            gh release create $tag $archive $checksum --title "imv $tag" --generate-notes
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release publication failed with exit code $LASTEXITCODE"
+          }

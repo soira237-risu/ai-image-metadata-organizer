@@ -2,6 +2,8 @@ package mover
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +40,7 @@ func TestPlanDoesNotMoveWithoutApply(t *testing.T) {
 	if _, err := os.Stat(source); err != nil {
 		t.Fatalf("source should remain in place for dry-run: %v", err)
 	}
-	record, err := db.GetByID(id, false)
+	record, err := db.GetByID(context.Background(), id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +76,7 @@ func TestApplyMovesFileUpdatesDBAndWritesLog(t *testing.T) {
 	if _, err := os.Stat(plans[0].DestinationPath); err != nil {
 		t.Fatalf("destination should exist: %v", err)
 	}
-	record, err := db.GetByID(id, false)
+	record, err := db.GetByID(context.Background(), id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +121,102 @@ func TestApplyRollsBackFileMoveWhenDBUpdateFails(t *testing.T) {
 	}
 	if _, err := os.Stat(plan.DestinationPath); !os.IsNotExist(err) {
 		t.Fatalf("destination should not remain after rollback, err=%v", err)
+	}
+}
+
+func TestSanitizePathSegmentAvoidsWindowsReservedNames(t *testing.T) {
+	for _, input := range []string{"CON", "nul", "COM1.txt", "LPT9"} {
+		got := SanitizePathSegment(input)
+		if got == input || got == "" {
+			t.Fatalf("reserved name %q was not made safe: %q", input, got)
+		}
+	}
+}
+
+func TestApplyFallsBackToCopyAcrossFilesystems(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "image.png")
+	content := []byte("cross-volume image")
+	if err := os.WriteFile(source, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	db, id := seedMoveRecord(t, dir, source)
+	destination := filepath.Join(dir, "other-volume", "blue hair", "image.png")
+	plan := MovePlan{FileID: id, SourcePath: source, DestinationPath: destination, Reason: "tag:blue hair", Status: "planned"}
+	ops := defaultFileOps()
+	realRename := ops.rename
+	ops.rename = func(oldPath, newPath string) error {
+		if oldPath == source && newPath == destination {
+			return errCrossDevice
+		}
+		return realRename(oldPath, newPath)
+	}
+
+	applied, err := applyOneWithFS(context.Background(), db, plan, Options{
+		Conflict: "skip",
+		LogPath:  filepath.Join(dir, ".imv", "move-log.jsonl"),
+	}, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Status != "moved" {
+		t.Fatalf("status = %q", applied.Status)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source should be removed after copy fallback, err=%v", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("destination content = %q", got)
+	}
+	record, err := db.GetByID(context.Background(), id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Path != destination {
+		t.Fatalf("DB path = %q", record.Path)
+	}
+}
+
+func TestConflictRenameStopsOnStatError(t *testing.T) {
+	ops := defaultFileOps()
+	ops.stat = func(string) (fs.FileInfo, error) {
+		return nil, fs.ErrPermission
+	}
+
+	_, err := renamedPathWithFS("image.png", ops)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("expected permission error, got %v", err)
+	}
+}
+
+func TestLogFailureDoesNotTurnCompletedMoveIntoFailure(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "image.png")
+	if err := os.WriteFile(source, []byte("not real image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := seedMoveRecord(t, dir, source)
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	plans, err := PlanAndMaybeApply(context.Background(), db, Options{
+		Tag:      "blue hair",
+		To:       filepath.Join(dir, "sorted"),
+		Apply:    true,
+		Conflict: "skip",
+		LogPath:  filepath.Join(blocker, "move-log.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("completed move should not fail because logging failed: %v", err)
+	}
+	if len(plans) != 1 || plans[0].Status != "moved" || plans[0].Warning == "" {
+		t.Fatalf("unexpected plan: %#v", plans)
 	}
 }
 
