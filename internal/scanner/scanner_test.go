@@ -2,11 +2,34 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
+
+func TestCanceledScanCountsOnlyProcessedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writePNGTextFixture(filepath.Join(dir, "image.png"), map[string]string{"Description": "blue hair"}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(dir, ".imv", "imv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := Scan(ctx, db, Options{Root: dir, Workers: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if result.Scanned != 0 || result.Indexed != 0 || result.Skipped != 0 {
+		t.Fatalf("canceled result counted unprocessed files: %#v", result)
+	}
+}
 
 func TestScanIndexesPNGFixtureAndSearchesTag(t *testing.T) {
 	dir := t.TempDir()
@@ -33,7 +56,7 @@ func TestScanIndexesPNGFixtureAndSearchesTag(t *testing.T) {
 		t.Fatalf("unexpected scan result: %#v", result)
 	}
 
-	found, err := db.Search(store.SearchOptions{Tag: "blue hair", Limit: 10})
+	found, err := db.Search(context.Background(), store.SearchOptions{Tag: "blue hair", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +86,7 @@ func TestScanIndexesWebPJSONPromptAndSearchesTag(t *testing.T) {
 		t.Fatalf("unexpected scan result: %#v", result)
 	}
 
-	found, err := db.Search(store.SearchOptions{Tag: "rain", Limit: 10})
+	found, err := db.Search(context.Background(), store.SearchOptions{Tag: "rain", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

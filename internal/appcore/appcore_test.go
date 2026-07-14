@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"os"
 	"path/filepath"
@@ -148,6 +149,35 @@ func TestServiceExportWritesStableJSON(t *testing.T) {
 	}
 }
 
+func TestAtomicExportPreservesExistingFileWhenReplaceFails(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "export.json")
+	if err := os.WriteFile(out, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultAtomicFileOps()
+	ops.replace = func(string, string) error { return errors.New("replace failed") }
+
+	err := writeFileAtomicallyWithFS(out, []byte("new"), 0644, ops)
+	if err == nil {
+		t.Fatal("expected replace failure")
+	}
+	got, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "old" {
+		t.Fatalf("existing export was changed: %q", got)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(dir, ".imv-export-*.tmp"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary exports were not cleaned: %v", matches)
+	}
+}
+
 func TestServiceMoveDryRunAndApply(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "image.png")
@@ -202,7 +232,7 @@ func TestServiceMoveDryRunAndApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	record, err := db.GetByID(id, false)
+	record, err := db.GetByID(context.Background(), id, false)
 	if err != nil {
 		t.Fatal(err)
 	}

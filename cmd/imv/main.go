@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 
 	"github.com/soira237-risu/ai-image-metadata-organizer/internal/appcore"
@@ -17,8 +20,20 @@ import (
 
 const defaultDBPath = appcore.DefaultDBPath
 
+const (
+	scanUsage   = "imv scan <folder> [--db " + defaultDBPath + "] [--workers 4] [--rescan] [--fail-on-error] [--json]"
+	showUsage   = "imv show <path-or-id> [--db " + defaultDBPath + "] [--raw] [--json]"
+	searchUsage = "imv search [--db " + defaultDBPath + "] [--tag <tag>] [--source nai|comfyui] [--format png|webp] [--has-workflow] [--q <text>] [--limit 50] [--long] [--json]"
+	tagsUsage   = "imv tags [--db " + defaultDBPath + "] [--source nai|comfyui|generic|unknown] [--q <text>] [--limit 100] [--json]"
+	statsUsage  = "imv stats [--db " + defaultDBPath + "] [--json]"
+	exportUsage = "imv export --out <file.json> [--db " + defaultDBPath + "] [--pretty]"
+	moveUsage   = "imv move --tag <tag> --to <folder> [--db " + defaultDBPath + "] [--apply] [--conflict skip|rename] [--json]"
+)
+
 func main() {
-	if err := runWithIO(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runWithIOContext(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -29,6 +44,10 @@ func run(args []string) error {
 }
 
 func runWithIO(args []string, stdout, stderr io.Writer) error {
+	return runWithIOContext(context.Background(), args, stdout, stderr)
+}
+
+func runWithIOContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		printUsage(stdout)
 		return nil
@@ -36,20 +55,22 @@ func runWithIO(args []string, stdout, stderr io.Writer) error {
 
 	switch args[0] {
 	case "scan":
-		return runScan(args[1:], stdout, stderr)
+		return runScan(ctx, args[1:], stdout, stderr)
 	case "show":
-		return runShow(args[1:], stdout, stderr)
+		return runShow(ctx, args[1:], stdout, stderr)
 	case "search":
-		return runSearch(args[1:], stdout, stderr)
+		return runSearch(ctx, args[1:], stdout, stderr)
 	case "tags":
-		return runTags(args[1:], stdout, stderr)
+		return runTags(ctx, args[1:], stdout, stderr)
 	case "stats":
-		return runStats(args[1:], stdout, stderr)
+		return runStats(ctx, args[1:], stdout, stderr)
 	case "export":
-		return runExport(args[1:], stderr)
+		return runExport(ctx, args[1:], stdout, stderr)
 	case "move":
-		return runMove(args[1:], stdout, stderr)
-	case "help", "-h", "--help":
+		return runMove(ctx, args[1:], stdout, stderr)
+	case "help":
+		return runHelp(ctx, args[1:], stdout, stderr)
+	case "-h", "--help":
 		printUsage(stdout)
 		return nil
 	default:
@@ -57,20 +78,28 @@ func runWithIO(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-func runScan(args []string, stdout, stderr io.Writer) error {
+func runScan(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("scan", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	workers := fs.Int("workers", 4, "number of scanner workers")
 	rescan := fs.Bool("rescan", false, "rescan unchanged files")
+	failOnError := fs.Bool("fail-on-error", false, "return an error when any file fails to scan")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, scanUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: imv scan <folder> [--db %s] [--workers 4] [--rescan] [--json]", defaultDBPath)
+		return fmt.Errorf("usage: %s", scanUsage)
+	}
+	if *workers <= 0 {
+		return fmt.Errorf("--workers must be greater than zero")
 	}
 
-	result, err := appcore.New(*dbPath).Scan(context.Background(), appcore.ScanRequest{
+	result, err := appcore.New(*dbPath).Scan(ctx, appcore.ScanRequest{
 		Root:    fs.Arg(0),
 		Workers: *workers,
 		Rescan:  *rescan,
@@ -79,28 +108,42 @@ func runScan(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if *asJSON {
-		return printJSON(stdout, scanOutput(result), true)
+		if err := printJSON(stdout, scanOutput(result), true); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(stdout, "scanned=%d indexed=%d skipped=%d errors=%d\n", result.Scanned, result.Indexed, result.Skipped, len(result.Errors))
+		for _, scanErr := range result.Errors {
+			fmt.Fprintf(stderr, "%s: %s\n", scanErr.Path, scanErr.Error)
+		}
 	}
-	fmt.Fprintf(stdout, "scanned=%d indexed=%d skipped=%d errors=%d\n", result.Scanned, result.Indexed, result.Skipped, len(result.Errors))
-	for _, scanErr := range result.Errors {
-		fmt.Fprintf(stderr, "%s: %s\n", scanErr.Path, scanErr.Error)
+	return scanCommandError(result, *failOnError)
+}
+
+func scanCommandError(result appcore.ScanResult, failOnError bool) error {
+	if failOnError && len(result.Errors) > 0 {
+		return fmt.Errorf("scan completed with %d file errors", len(result.Errors))
 	}
 	return nil
 }
 
-func runShow(args []string, stdout, stderr io.Writer) error {
+func runShow(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("show", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	raw := fs.Bool("raw", false, "include raw metadata")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, showUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: imv show <path-or-id> [--raw] [--json]")
+		return fmt.Errorf("usage: %s", showUsage)
 	}
 
-	detail, err := appcore.New(*dbPath).GetImage(context.Background(), appcore.GetImageRequest{
+	detail, err := appcore.New(*dbPath).GetImage(ctx, appcore.GetImageRequest{
 		Ref:        fs.Arg(0),
 		IncludeRaw: *raw,
 	})
@@ -131,7 +174,7 @@ func runShow(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func runSearch(args []string, stdout, stderr io.Writer) error {
+func runSearch(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("search", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	tag := fs.String("tag", "", "normalized tag to search")
@@ -142,11 +185,21 @@ func runSearch(args []string, stdout, stderr io.Writer) error {
 	long := fs.Bool("long", false, "do not shorten prompt and tag previews")
 	limit := fs.Int("limit", 50, "maximum records")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, searchUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: %s", searchUsage)
+	}
+	if *limit <= 0 {
+		return fmt.Errorf("--limit must be greater than zero")
+	}
 
-	records, err := appcore.New(*dbPath).Search(context.Background(), appcore.SearchRequest{
+	records, err := appcore.New(*dbPath).Search(ctx, appcore.SearchRequest{
 		Tag:         *tag,
 		Source:      *source,
 		Query:       *query,
@@ -163,18 +216,28 @@ func runSearch(args []string, stdout, stderr io.Writer) error {
 	return printSearchTable(stdout, records, *long)
 }
 
-func runTags(args []string, stdout, stderr io.Writer) error {
+func runTags(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("tags", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	source := fs.String("source", "", "metadata source")
 	query := fs.String("q", "", "tag text query")
 	limit := fs.Int("limit", 100, "maximum tags")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, tagsUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: %s", tagsUsage)
+	}
+	if *limit <= 0 {
+		return fmt.Errorf("--limit must be greater than zero")
+	}
 
-	tags, err := appcore.New(*dbPath).Tags(context.Background(), appcore.TagsRequest{
+	tags, err := appcore.New(*dbPath).Tags(ctx, appcore.TagsRequest{
 		Source: *source,
 		Query:  *query,
 		Limit:  *limit,
@@ -188,15 +251,22 @@ func runTags(args []string, stdout, stderr io.Writer) error {
 	return printTagsTable(stdout, tags)
 }
 
-func runStats(args []string, stdout, stderr io.Writer) error {
+func runStats(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("stats", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, statsUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: %s", statsUsage)
+	}
 
-	stats, err := appcore.New(*dbPath).Stats(context.Background())
+	stats, err := appcore.New(*dbPath).Stats(ctx)
 	if err != nil {
 		return err
 	}
@@ -206,23 +276,30 @@ func runStats(args []string, stdout, stderr io.Writer) error {
 	return printStats(stdout, stats)
 }
 
-func runExport(args []string, stderr io.Writer) error {
+func runExport(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("export", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	out := fs.String("out", "", "JSON output path")
 	pretty := fs.Bool("pretty", false, "pretty-print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, exportUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: %s", exportUsage)
+	}
 	if *out == "" {
-		return fmt.Errorf("usage: imv export --out <file.json> [--pretty]")
+		return fmt.Errorf("usage: %s", exportUsage)
 	}
 
-	_, err := appcore.New(*dbPath).Export(context.Background(), appcore.ExportRequest{Out: *out, Pretty: *pretty})
+	_, err = appcore.New(*dbPath).Export(ctx, appcore.ExportRequest{Out: *out, Pretty: *pretty})
 	return err
 }
 
-func runMove(args []string, stdout, stderr io.Writer) error {
+func runMove(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("move", stderr)
 	dbPath := fs.String("db", defaultDBPath, "SQLite database path")
 	tag := fs.String("tag", "", "tag to move")
@@ -230,20 +307,26 @@ func runMove(args []string, stdout, stderr io.Writer) error {
 	apply := fs.Bool("apply", false, "apply file moves")
 	conflict := fs.String("conflict", "skip", "conflict behavior: skip or rename")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := parseInterspersed(fs, args); err != nil {
+	handled, err := parseCommandFlags(fs, args, stdout, moveUsage)
+	if err != nil {
 		return err
 	}
+	if handled {
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: %s", moveUsage)
+	}
 	if *tag == "" || *to == "" {
-		return fmt.Errorf("usage: imv move --tag <tag> --to <folder> [--apply] [--conflict skip|rename]")
+		return fmt.Errorf("usage: %s", moveUsage)
 	}
 
 	service := appcore.New(*dbPath)
 	var plans []appcore.MovePlan
-	var err error
 	if *apply {
-		plans, err = service.ApplyMove(context.Background(), appcore.MoveRequest{Tag: *tag, To: *to, Conflict: *conflict})
+		plans, err = service.ApplyMove(ctx, appcore.MoveRequest{Tag: *tag, To: *to, Conflict: *conflict})
 	} else {
-		plans, err = service.PlanMove(context.Background(), appcore.MoveRequest{Tag: *tag, To: *to, Conflict: *conflict})
+		plans, err = service.PlanMove(ctx, appcore.MoveRequest{Tag: *tag, To: *to, Conflict: *conflict})
 	}
 	if err != nil {
 		return err
@@ -255,6 +338,36 @@ func runMove(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "%s\t%s -> %s\t%s\n", plan.Status, plan.SourcePath, plan.DestinationPath, plan.Reason)
 	}
 	return nil
+}
+
+func runHelp(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return nil
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("usage: imv help [command]")
+	}
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		printUsage(stdout)
+		return nil
+	}
+	return runWithIOContext(ctx, []string{args[0], "--help"}, stdout, stderr)
+}
+
+func parseCommandFlags(fs *flag.FlagSet, args []string, stdout io.Writer, usage string) (bool, error) {
+	err := parseInterspersed(fs, args)
+	if errors.Is(err, flag.ErrHelp) {
+		printCommandUsage(stdout, usage, fs)
+		return true, nil
+	}
+	return false, err
+}
+
+func printCommandUsage(stdout io.Writer, usage string, fs *flag.FlagSet) {
+	fmt.Fprintf(stdout, "Usage: %s\n\nOptions:\n", usage)
+	fs.SetOutput(stdout)
+	fs.PrintDefaults()
 }
 
 func parseInterspersed(fs *flag.FlagSet, args []string) error {
@@ -290,11 +403,12 @@ func flagNeedsValue(fs *flag.FlagSet, name string) bool {
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {}
 	return fs
 }
 
 func printUsage(stdout io.Writer) {
-	fmt.Fprintln(stdout, strings.TrimSpace(`imv - NovelAI-first AI image metadata organizer
+	fmt.Fprintln(stdout, strings.TrimSpace(`imv - local AI image metadata indexer and organizer
 
 Commands:
   scan    index PNG/WebP files
@@ -303,7 +417,9 @@ Commands:
   tags    summarize indexed prompt tags
   stats   summarize the current index
   export  write deterministic JSON export
-  move    plan or apply tag-based moves`))
+  move    plan or apply tag-based moves
+
+Run "imv help <command>" for command-specific options.`))
 }
 
 func printJSON(stdout io.Writer, v any, pretty bool) error {

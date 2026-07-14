@@ -19,6 +19,8 @@ type DB struct {
 	sql *sql.DB
 }
 
+const currentSchemaVersion = 1
+
 type ImageRecord struct {
 	ID       int64            `json:"id"`
 	Path     string           `json:"path"`
@@ -101,7 +103,14 @@ func Open(path string) (*DB, error) {
 	}
 	sqldb.SetMaxOpenConns(1)
 	db := &DB{sql: sqldb}
-	if err := db.init(); err != nil {
+	ctx := context.Background()
+	for _, pragma := range []string{`pragma foreign_keys = on`, `pragma busy_timeout = 5000`} {
+		if _, err := sqldb.ExecContext(ctx, pragma); err != nil {
+			_ = sqldb.Close()
+			return nil, err
+		}
+	}
+	if err := db.init(ctx); err != nil {
 		_ = sqldb.Close()
 		return nil, err
 	}
@@ -112,9 +121,26 @@ func (db *DB) Close() error {
 	return db.sql.Close()
 }
 
-func (db *DB) init() error {
+func (db *DB) init(ctx context.Context) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `create table if not exists migrations (version integer primary key, applied_at text not null)`); err != nil {
+		return err
+	}
+	var version int
+	if err := tx.QueryRowContext(ctx, `select coalesce(max(version), 0) from migrations`).Scan(&version); err != nil {
+		return err
+	}
+	if version > currentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", version, currentSchemaVersion)
+	}
+	if version == currentSchemaVersion {
+		return tx.Commit()
+	}
 	schema := []string{
-		`create table if not exists migrations (version integer primary key, applied_at text not null);`,
 		`create table if not exists files (
 			id integer primary key autoincrement,
 			path text not null unique,
@@ -148,16 +174,19 @@ func (db *DB) init() error {
 		`create index if not exists idx_metadata_source on metadata(source);`,
 	}
 	for _, stmt := range schema {
-		if _, err := db.sql.Exec(stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `insert into migrations(version, applied_at) values(?, ?)`, currentSchemaVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (db *DB) IsUnchanged(path string, size int64, mtime int64) (bool, error) {
+func (db *DB) IsUnchanged(ctx context.Context, path string, size int64, mtime int64) (bool, error) {
 	var count int
-	err := db.sql.QueryRow(`select count(*) from files where path = ? and size = ? and mtime = ?`, path, size, mtime).Scan(&count)
+	err := db.sql.QueryRowContext(ctx, `select count(*) from files where path = ? and size = ? and mtime = ?`, path, size, mtime).Scan(&count)
 	return count > 0, err
 }
 
@@ -223,15 +252,15 @@ func (db *DB) UpsertFile(ctx context.Context, input FileInput) (int64, error) {
 	return id, nil
 }
 
-func (db *DB) GetByID(id int64, includeRaw bool) (ImageRecord, error) {
-	return db.get(`f.id = ?`, includeRaw, id)
+func (db *DB) GetByID(ctx context.Context, id int64, includeRaw bool) (ImageRecord, error) {
+	return db.get(ctx, `f.id = ?`, includeRaw, id)
 }
 
-func (db *DB) GetByPath(path string, includeRaw bool) (ImageRecord, error) {
-	return db.get(`f.path = ?`, includeRaw, path)
+func (db *DB) GetByPath(ctx context.Context, path string, includeRaw bool) (ImageRecord, error) {
+	return db.get(ctx, `f.path = ?`, includeRaw, path)
 }
 
-func (db *DB) Search(opts SearchOptions) ([]ImageRecord, error) {
+func (db *DB) Search(ctx context.Context, opts SearchOptions) ([]ImageRecord, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
@@ -259,13 +288,13 @@ func (db *DB) Search(opts SearchOptions) ([]ImageRecord, error) {
 	}
 	args = append(args, opts.Limit)
 
-	rows, err := db.sql.Query(`select f.id from files f where `+strings.Join(clauses, " and ")+` order by f.path limit ?`, args...)
+	rows, err := db.sql.QueryContext(ctx, `select f.id from files f where `+strings.Join(clauses, " and ")+` order by f.path limit ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	ids := []int64{}
+	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
@@ -280,24 +309,16 @@ func (db *DB) Search(opts SearchOptions) ([]ImageRecord, error) {
 		return nil, err
 	}
 
-	records := make([]ImageRecord, 0, len(ids))
-	for _, id := range ids {
-		record, err := db.GetByID(id, false)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	return records, nil
+	return db.loadRecords(ctx, ids, false)
 }
 
-func (db *DB) Export() ([]ImageRecord, error) {
-	rows, err := db.sql.Query(`select id from files order by path`)
+func (db *DB) Export(ctx context.Context) ([]ImageRecord, error) {
+	rows, err := db.sql.QueryContext(ctx, `select id from files order by path`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	ids := []int64{}
+	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
@@ -312,18 +333,10 @@ func (db *DB) Export() ([]ImageRecord, error) {
 		return nil, err
 	}
 
-	records := make([]ImageRecord, 0, len(ids))
-	for _, id := range ids {
-		record, err := db.GetByID(id, true)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	return records, nil
+	return db.loadRecords(ctx, ids, true)
 }
 
-func (db *DB) TagsSummary(opts TagSummaryOptions) ([]TagSummary, error) {
+func (db *DB) TagsSummary(ctx context.Context, opts TagSummaryOptions) ([]TagSummary, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 100
 	}
@@ -340,7 +353,7 @@ func (db *DB) TagsSummary(opts TagSummaryOptions) ([]TagSummary, error) {
 	}
 	args = append(args, opts.Limit)
 
-	rows, err := db.sql.Query(`select t.normalized_tag, min(t.tag), count(distinct t.file_id)
+	rows, err := db.sql.QueryContext(ctx, `select t.normalized_tag, min(t.tag), count(distinct t.file_id), group_concat(distinct t.source)
 		from tags t
 		where `+strings.Join(clauses, " and ")+`
 		group by t.normalized_tag
@@ -351,11 +364,16 @@ func (db *DB) TagsSummary(opts TagSummaryOptions) ([]TagSummary, error) {
 	}
 	defer rows.Close()
 
-	summaries := []TagSummary{}
+	var summaries []TagSummary
 	for rows.Next() {
 		var item TagSummary
-		if err := rows.Scan(&item.Tag, &item.Example, &item.Count); err != nil {
+		var sources string
+		if err := rows.Scan(&item.Tag, &item.Example, &item.Count, &sources); err != nil {
 			return nil, err
+		}
+		if sources != "" {
+			item.Sources = strings.Split(sources, ",")
+			sort.Strings(item.Sources)
 		}
 		summaries = append(summaries, item)
 	}
@@ -366,44 +384,37 @@ func (db *DB) TagsSummary(opts TagSummaryOptions) ([]TagSummary, error) {
 		return nil, err
 	}
 
-	for i := range summaries {
-		sources, err := db.tagSources(summaries[i].Tag, opts.Source)
-		if err != nil {
-			return nil, err
-		}
-		summaries[i].Sources = sources
-	}
 	return summaries, nil
 }
 
-func (db *DB) Stats() (Stats, error) {
+func (db *DB) Stats(ctx context.Context) (Stats, error) {
 	stats := Stats{
 		Formats: map[string]int{},
 		Sources: map[string]int{},
 	}
 	var first, last sql.NullString
-	if err := db.sql.QueryRow(`select count(*), min(scanned_at), max(scanned_at) from files`).Scan(&stats.TotalFiles, &first, &last); err != nil {
+	if err := db.sql.QueryRowContext(ctx, `select count(*), min(scanned_at), max(scanned_at) from files`).Scan(&stats.TotalFiles, &first, &last); err != nil {
 		return Stats{}, err
 	}
 	stats.FirstScanned = parseTimePtr(first)
 	stats.LastScanned = parseTimePtr(last)
 
-	formats, err := db.countsBy(`select format, count(*) from files group by format order by format`)
+	formats, err := db.countsBy(ctx, `select format, count(*) from files group by format order by format`)
 	if err != nil {
 		return Stats{}, err
 	}
 	stats.Formats = formats
 
-	sources, err := db.countsBy(`select source, count(distinct file_id) from metadata group by source order by source`)
+	sources, err := db.countsBy(ctx, `select source, count(distinct file_id) from metadata group by source order by source`)
 	if err != nil {
 		return Stats{}, err
 	}
 	stats.Sources = sources
 
-	if err := db.sql.QueryRow(`select count(distinct f.id) from files f where exists(select 1 from metadata m where m.file_id = f.id and ` + workflowPredicate("m") + `)`).Scan(&stats.WorkflowFiles); err != nil {
+	if err := db.sql.QueryRowContext(ctx, `select count(distinct f.id) from files f where exists(select 1 from metadata m where m.file_id = f.id and `+workflowPredicate("m")+`)`).Scan(&stats.WorkflowFiles); err != nil {
 		return Stats{}, err
 	}
-	topTags, err := db.TagsSummary(TagSummaryOptions{Limit: 10})
+	topTags, err := db.TagsSummary(ctx, TagSummaryOptions{Limit: 10})
 	if err != nil {
 		return Stats{}, err
 	}
@@ -416,35 +427,12 @@ func (db *DB) UpdatePath(ctx context.Context, id int64, newPath string) error {
 	return err
 }
 
-func (db *DB) RecordsByTag(tag string) ([]ImageRecord, error) {
-	return db.Search(SearchOptions{Tag: tag, Limit: 1000000})
+func (db *DB) RecordsByTag(ctx context.Context, tag string) ([]ImageRecord, error) {
+	return db.Search(ctx, SearchOptions{Tag: tag, Limit: 1000000})
 }
 
-func (db *DB) tagSources(tag, sourceFilter string) ([]string, error) {
-	clauses := []string{`normalized_tag = ?`}
-	args := []any{tag}
-	if sourceFilter != "" {
-		clauses = append(clauses, `source = ?`)
-		args = append(args, sourceFilter)
-	}
-	rows, err := db.sql.Query(`select distinct source from tags where `+strings.Join(clauses, " and ")+` order by source`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	sources := []string{}
-	for rows.Next() {
-		var source string
-		if err := rows.Scan(&source); err != nil {
-			return nil, err
-		}
-		sources = append(sources, source)
-	}
-	return sources, rows.Err()
-}
-
-func (db *DB) countsBy(query string) (map[string]int, error) {
-	rows, err := db.sql.Query(query)
+func (db *DB) countsBy(ctx context.Context, query string) (map[string]int, error) {
+	rows, err := db.sql.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -476,8 +464,8 @@ func parseTimePtr(value sql.NullString) *time.Time {
 	return &parsed
 }
 
-func (db *DB) get(where string, includeRaw bool, args ...any) (ImageRecord, error) {
-	row := db.sql.QueryRow(`select f.id, f.path, f.format, f.size, f.mtime, f.width, f.height, f.scanned_at from files f where `+where, args...)
+func (db *DB) get(ctx context.Context, where string, includeRaw bool, args ...any) (ImageRecord, error) {
+	row := db.sql.QueryRowContext(ctx, `select f.id, f.path, f.format, f.size, f.mtime, f.width, f.height, f.scanned_at from files f where `+where, args...)
 	var record ImageRecord
 	var scanned string
 	if err := row.Scan(&record.ID, &record.Path, &record.Format, &record.Size, &record.MTime, &record.Width, &record.Height, &scanned); err != nil {
@@ -488,11 +476,11 @@ func (db *DB) get(where string, includeRaw bool, args ...any) (ImageRecord, erro
 	}
 	record.Scanned, _ = time.Parse(time.RFC3339Nano, scanned)
 
-	metadata, err := db.loadMetadata(record.ID, includeRaw)
+	metadata, err := db.loadMetadata(ctx, record.ID, includeRaw)
 	if err != nil {
 		return ImageRecord{}, err
 	}
-	tags, err := db.loadTags(record.ID)
+	tags, err := db.loadTags(ctx, record.ID)
 	if err != nil {
 		return ImageRecord{}, err
 	}
@@ -501,13 +489,108 @@ func (db *DB) get(where string, includeRaw bool, args ...any) (ImageRecord, erro
 	return record, nil
 }
 
-func (db *DB) loadMetadata(fileID int64, includeRaw bool) ([]MetadataRecord, error) {
-	rows, err := db.sql.Query(`select source, positive_prompt, negative_prompt, settings_json, workflow_summary_json, raw_json from metadata where file_id = ? order by source`, fileID)
+func (db *DB) loadRecords(ctx context.Context, ids []int64, includeRaw bool) ([]ImageRecord, error) {
+	if len(ids) == 0 {
+		return []ImageRecord{}, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	rows, err := db.sql.QueryContext(ctx, `select id, path, format, size, mtime, width, height, scanned_at from files where id in (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]ImageRecord, len(ids))
+	for rows.Next() {
+		var record ImageRecord
+		var scanned string
+		if err := rows.Scan(&record.ID, &record.Path, &record.Format, &record.Size, &record.MTime, &record.Width, &record.Height, &scanned); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		record.Scanned, _ = time.Parse(time.RFC3339Nano, scanned)
+		byID[record.ID] = record
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	metadataRows, err := db.sql.QueryContext(ctx, `select file_id, source, positive_prompt, negative_prompt, settings_json, workflow_summary_json, raw_json from metadata where file_id in (`+placeholders+`) order by file_id, source`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for metadataRows.Next() {
+		var fileID int64
+		var item MetadataRecord
+		var settingsJSON, workflowJSON, rawJSON string
+		if err := metadataRows.Scan(&fileID, &item.Source, &item.PositivePrompt, &item.NegativePrompt, &settingsJSON, &workflowJSON, &rawJSON); err != nil {
+			metadataRows.Close()
+			return nil, err
+		}
+		item.Settings = parseMap(settingsJSON)
+		item.WorkflowSummary = parseMap(workflowJSON)
+		if includeRaw {
+			item.Raw = parseMap(rawJSON)
+		}
+		record := byID[fileID]
+		record.Metadata = append(record.Metadata, item)
+		byID[fileID] = record
+	}
+	if err := metadataRows.Err(); err != nil {
+		metadataRows.Close()
+		return nil, err
+	}
+	if err := metadataRows.Close(); err != nil {
+		return nil, err
+	}
+
+	tagRows, err := db.sql.QueryContext(ctx, `select file_id, tag, normalized_tag, source, kind from tags where file_id in (`+placeholders+`) order by file_id, normalized_tag`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for tagRows.Next() {
+		var fileID int64
+		var tag TagRecord
+		if err := tagRows.Scan(&fileID, &tag.Tag, &tag.Normalized, &tag.Source, &tag.Kind); err != nil {
+			tagRows.Close()
+			return nil, err
+		}
+		record := byID[fileID]
+		record.Tags = append(record.Tags, tag)
+		byID[fileID] = record
+	}
+	if err := tagRows.Err(); err != nil {
+		tagRows.Close()
+		return nil, err
+	}
+	if err := tagRows.Close(); err != nil {
+		return nil, err
+	}
+
+	records := make([]ImageRecord, 0, len(ids))
+	for _, id := range ids {
+		record, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("record not found")
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func (db *DB) loadMetadata(ctx context.Context, fileID int64, includeRaw bool) ([]MetadataRecord, error) {
+	rows, err := db.sql.QueryContext(ctx, `select source, positive_prompt, negative_prompt, settings_json, workflow_summary_json, raw_json from metadata where file_id = ? order by source`, fileID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := []MetadataRecord{}
+	var result []MetadataRecord
 	for rows.Next() {
 		var item MetadataRecord
 		var settingsJSON, workflowJSON, rawJSON string
@@ -524,13 +607,13 @@ func (db *DB) loadMetadata(fileID int64, includeRaw bool) ([]MetadataRecord, err
 	return result, rows.Err()
 }
 
-func (db *DB) loadTags(fileID int64) ([]TagRecord, error) {
-	rows, err := db.sql.Query(`select tag, normalized_tag, source, kind from tags where file_id = ? order by normalized_tag`, fileID)
+func (db *DB) loadTags(ctx context.Context, fileID int64) ([]TagRecord, error) {
+	rows, err := db.sql.QueryContext(ctx, `select tag, normalized_tag, source, kind from tags where file_id = ? order by normalized_tag`, fileID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := []TagRecord{}
+	var result []TagRecord
 	for rows.Next() {
 		var tag TagRecord
 		if err := rows.Scan(&tag.Tag, &tag.Normalized, &tag.Source, &tag.Kind); err != nil {
@@ -562,7 +645,7 @@ func NormalizeTag(tag string) string {
 func SplitPromptTags(prompt string) []TagRecord {
 	parts := strings.Split(prompt, ",")
 	seen := map[string]bool{}
-	tags := []TagRecord{}
+	var tags []TagRecord
 	for _, part := range parts {
 		tag := strings.TrimSpace(part)
 		normalized := NormalizeTag(tag)

@@ -1,74 +1,70 @@
-# AI Coding Agent Guide
+# AGENTS.md
 
-이 문서는 AI 코딩 에이전트가 이 저장소를 수정할 때 지켜야 할 최소 규칙입니다.
+## 프로젝트 목표 / Project mission
 
-This guide defines the minimum rules for AI coding agents working in this repository.
+`imv`는 NovelAI와 ComfyUI 이미지의 메타데이터를 로컬에서 색인·검색·내보내기·정리하는 CLI 우선 도구다. 현재 개발의 중심은 설치 부담이 낮은 Go CLI와 공통 코어이며, GUI는 같은 코어를 사용하는 얇은 독립 데스크톱 어댑터로 유지한다.
 
-## 패키지 지도 / Package Map
+`imv` is a CLI-first local tool for indexing, searching, exporting, and organizing NovelAI and ComfyUI image metadata. Development focuses on the low-friction Go CLI and shared core; the GUI remains a thin standalone desktop adapter over that same core.
 
-- `cmd/imv`: CLI 진입점과 명령 dispatch
-- `cmd/imv-gui`: Wails 데스크톱 진입점과 백엔드
-- `internal/appcore`: CLI와 GUI가 공유하는 애플리케이션 서비스
-- `internal/metadata`: NovelAI, ComfyUI, 일반 PNG/WebP 메타데이터 추출
-- `internal/scanner`: PNG/WebP 파일 검색과 인덱싱
-- `internal/store`: SQLite 스키마와 인덱스 저장소
-- `internal/mover`: 이동 계획, 충돌 정책, 적용, 이동 로그
-- `gui`: React + TypeScript + Vite 프런트엔드 소스
-- `cmd/imv-gui/frontend/dist`: Wails 임베드용 생성 프런트엔드 결과물
+## 먼저 읽을 문서 / Read first
 
-## 필수 검증 / Required Verification
+1. `README.md` — 사용자 범위와 명령
+2. `docs/ARCHITECTURE.md` — 코드 경계와 데이터 흐름
+3. `docs/ROADMAP.md` — 현재 우선순위와 비목표
+4. `docs/DEVELOPMENT.md` — 개발·검증 명령
+5. `docs/decisions/` — 되돌리기 전 확인할 기술 결정
 
-저장소 루트에서 다음 명령을 실행합니다.
+## 변경 불변조건 / Change invariants
 
-Run these commands from the repository root:
+- 실제 제품 동작은 `internal/appcore`와 그 하위 패키지에 둔다.
+- `cmd/imv`는 인자 해석, 입력 검증, 텍스트/JSON 출력만 담당한다.
+- `cmd/imv-gui`와 `gui`에는 스캔·검색·이동 규칙을 중복 구현하지 않는다.
+- CLI 기능 개발에 GUI 변경을 강제하지 않는다. 공통 API가 바뀐 경우에만 GUI 어댑터의 컴파일과 계약을 맞춘다.
+- GUI는 브라우저 우선 제품으로 전환하지 않는다. Wails 기반 독립 데스크톱 앱을 기본으로 한다.
+- 파일 이동은 dry-run이 기본이며 실제 쓰기는 명시적 `--apply` 뒤에만 수행한다.
+- GUI 이동은 계획 검토와 명시적 확인 뒤에만 적용한다.
+- 충돌 정책은 `skip` 또는 `rename`만 허용하며 실패 시 가능한 범위에서 원래 상태로 롤백한다.
+- SQLite 단일 연결 구조에서는 열린 rows를 닫기 전에 상세 재조회를 하지 않는다.
+- 새 기능과 버그 수정은 가능한 한 실패 테스트를 먼저 추가한다.
+- 개인 이미지, prompt, SQLite DB와 로컬 경로를 커밋하거나 이슈·로그에 포함하지 않는다.
+
+## 작업 순서 / Working sequence
+
+1. `git status --short`로 기존 사용자 변경을 확인하고 보존한다.
+2. 변경이 CLI 표현인지 공통 동작인지 먼저 분류한다.
+3. 공통 동작이면 `internal/appcore` 또는 적절한 하위 패키지에 테스트를 먼저 작성한다.
+4. 최소 구현 후 CLI 어댑터를 연결한다.
+5. 공통 API가 바뀌었으면 Wails 백엔드가 계속 컴파일되는지 확인한다.
+6. 프런트엔드를 수정했으면 `cmd/imv-gui/frontend/dist`를 다시 생성해 함께 커밋한다.
+7. 사용자 동작이나 설계 결정이 달라졌으면 관련 문서와 ADR을 함께 갱신한다.
+
+## 기본 검증 / Default verification
+
+Windows에서는 전역 Go가 없으면 `.tools/go-portable-1.26.4/go/bin/go.exe`를 사용하고 `GOMODCACHE`와 `GOCACHE`를 작업공간 내부로 지정한다.
 
 ```powershell
-go version
 go test ./...
+go vet ./...
 go build -o .\bin\imv.exe .\cmd\imv
 .\bin\imv.exe help
 ```
 
-프런트엔드 변경이 있으면 `gui`에서 다음을 실행하고, 결과물 변경을 커밋합니다.
-
-For frontend changes, run these commands from `gui` and commit the generated result:
+GUI 또는 공통 API를 수정했다면 `go build ./cmd/imv-gui`도 실행한다. `gui`나 임베드 산출물을 수정한 경우 다음 검증을 추가한다.
 
 ```powershell
 Set-Location .\gui
-npm install
+npm ci
+npm run typecheck
 npm run test:run
 npm run build
 Set-Location ..
 ```
 
-Wails 통합 변경은 `cmd/imv-gui`에서 확인합니다.
+문서만 수정한 경우에도 `git diff --check`와 링크·명령 일관성을 확인한다.
 
-For Wails integration changes, verify from `cmd/imv-gui`:
+## 문서 규칙 / Documentation rules
 
-```powershell
-Set-Location .\cmd\imv-gui
-wails doctor
-wails build -m -nopackage -tags native_webview2loader -o imv-gui.exe
-```
-
-문서만 변경한 경우에도 `git diff --check`와 문서 링크/명령 일관성 검사를 실행합니다.
-
-For documentation-only changes, still run `git diff --check` and documentation link/command consistency checks.
-
-## 이동 안전성 / Move-Safety Invariants
-
-- CLI `move`는 `--apply` 없이는 계획만 생성해야 합니다.
-- GUI는 `PlanMove` 결과를 보여준 뒤 명시적인 확인을 거쳐 `ApplyMove`를 호출해야 합니다.
-- source, destination, tag를 확인하지 않은 상태에서 실제 파일 이동을 실행하지 않습니다.
-- 충돌 정책은 `skip` 또는 `rename`만 허용하며, 대상 경로는 태그를 안전한 경로 세그먼트로 정규화해야 합니다.
-- 파일 이동과 DB 경로 갱신이 실패하면 가능한 경우 원래 경로로 rollback하고, 결과를 이동 로그에 남깁니다.
-- CLI와 GUI의 이동 동작은 `internal/appcore`와 `internal/mover`의 공통 규칙을 유지해야 합니다.
-
-## 변경 경계 / Change Boundaries
-
-- 개인 이미지, prompt, SQLite DB, 로컬 경로를 커밋하거나 이슈/로그에 포함하지 않습니다.
-- 실행 파일(`*.exe`)을 커밋하지 않습니다.
-- UI를 변경하면 `gui` 프런트엔드를 다시 빌드하고 `cmd/imv-gui/frontend/dist` 변경을 함께 커밋합니다.
-- CLI와 GUI가 공유하는 `internal/appcore` 동작을 보존합니다. 한쪽만 동작을 바꾸지 말고 공용 서비스와 양쪽 테스트를 확인합니다.
-- 기존 변경을 되돌리지 않습니다. 작업 범위를 작은 focused change로 유지합니다.
-- 테스트는 변경한 패키지와 사용자 흐름에 맞춘 focused tests를 우선 추가하고, 마지막에는 전체 검증을 실행합니다.
+- `README.md`는 한글/영어 병기 형태를 유지한다.
+- 구조 변경은 `docs/ARCHITECTURE.md`, 우선순위 변경은 `docs/ROADMAP.md`에 반영한다.
+- 장기간 유지할 결정은 `docs/decisions/NNNN-*.md` ADR로 남긴다.
+- 현재 환경의 테스트·브랜치·생성 산출물 상태는 과거 기록을 재사용하지 말고 매번 다시 확인한다.

@@ -1,6 +1,7 @@
 .cache/
 .gocache/
 .gomodcache/
+.npm-cache/
 .tools/
 .imv/
 bin/
