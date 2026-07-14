@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -21,13 +19,14 @@ type Backend struct {
 	mu     sync.Mutex
 	folder string
 	dbPath string
-	file   string
+
+	scanCancel context.CancelFunc
+	scanSeq    uint64
 }
 
 type FolderState struct {
-	Folder       string `json:"folder"`
-	DBPath       string `json:"db_path"`
-	SelectedPath string `json:"selected_path,omitempty"`
+	Folder string `json:"folder"`
+	DBPath string `json:"db_path"`
 }
 
 type ExportResult struct {
@@ -40,12 +39,18 @@ func NewBackend() *Backend {
 }
 
 func (b *Backend) startup(ctx context.Context) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.ctx = ctx
 }
 
+func (b *Backend) shutdown(context.Context) {
+	b.CancelScan()
+}
+
 func (b *Backend) OpenFolder() (FolderState, error) {
-	folder, err := wailsruntime.OpenDirectoryDialog(b.ctx, wailsruntime.OpenDialogOptions{
-		Title: "이미지 폴더 열기",
+	folder, err := wailsruntime.OpenDirectoryDialog(b.appContext(), wailsruntime.OpenDialogOptions{
+		Title: "Open image folder",
 	})
 	if err != nil {
 		return FolderState{}, err
@@ -56,36 +61,16 @@ func (b *Backend) OpenFolder() (FolderState, error) {
 	return b.useFolder(folder), nil
 }
 
-func (b *Backend) OpenFile() (FolderState, error) {
-	path, err := wailsruntime.OpenFileDialog(b.ctx, wailsruntime.OpenDialogOptions{
-		Title: "이미지 파일 열기",
-		Filters: []wailsruntime.FileFilter{{
-			DisplayName: "PNG/WebP images (*.png;*.webp)",
-			Pattern:     "*.png;*.webp",
-		}},
+func (b *Backend) ChooseDestinationFolder() (string, error) {
+	return wailsruntime.OpenDirectoryDialog(b.appContext(), wailsruntime.OpenDialogOptions{
+		Title: "Choose destination folder",
 	})
-	if err != nil {
-		return FolderState{}, err
-	}
-	if strings.TrimSpace(path) == "" {
-		return b.State(), nil
-	}
-	return b.useFile(path), nil
-}
-
-func (b *Backend) Reset() FolderState {
-	b.mu.Lock()
-	b.folder = ""
-	b.file = ""
-	b.dbPath = appcore.DefaultDBPath
-	b.mu.Unlock()
-	return FolderState{DBPath: appcore.DefaultDBPath}
 }
 
 func (b *Backend) State() FolderState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return FolderState{Folder: b.folder, DBPath: b.dbPath, SelectedPath: b.file}
+	return FolderState{Folder: b.folder, DBPath: b.dbPath}
 }
 
 func (b *Backend) ScanFolder(folder string, rescan bool) (appcore.ScanResult, error) {
@@ -106,23 +91,22 @@ func (b *Backend) ScanFolder(folder string, rescan bool) (appcore.ScanResult, er
 	}
 	state := b.useFolder(folder)
 	service := appcore.New(state.DBPath)
-	result, err := service.Scan(context.Background(), appcore.ScanRequest{
+	scanCtx, finish := b.beginScanContext()
+	defer finish()
+	appCtx := b.appContext()
+	result, err := service.Scan(scanCtx, appcore.ScanRequest{
 		Root:    state.Folder,
 		Workers: 4,
 		Rescan:  rescan,
 	}, func(progress appcore.ScanProgress) {
-		if b.ctx != nil {
-			wailsruntime.EventsEmit(b.ctx, "scan:progress", progress)
-		}
+		wailsruntime.EventsEmit(appCtx, "scan:progress", progress)
 	})
-	if b.ctx != nil {
-		wailsruntime.EventsEmit(b.ctx, "scan:complete", result)
-	}
+	wailsruntime.EventsEmit(appCtx, "scan:complete", result)
 	return result, err
 }
 
 func (b *Backend) Search(req appcore.SearchRequest) ([]store.ImageRecord, error) {
-	return b.service().Search(context.Background(), req)
+	return b.service().Search(b.appContext(), req)
 }
 
 func (b *Backend) GetImage(req appcore.GetImageRequest) (appcore.ImageDetail, error) {
@@ -130,37 +114,29 @@ func (b *Backend) GetImage(req appcore.GetImageRequest) (appcore.ImageDetail, er
 		req.PreviewMaxBytes = appcore.DefaultPreviewMaxBytes
 	}
 	req.IncludePreview = true
-	return b.service().GetImage(context.Background(), req)
-}
-
-func (b *Backend) InspectFile(path string) (appcore.ImageDetail, error) {
-	return appcore.InspectFile(context.Background(), path, true, appcore.DefaultPreviewMaxBytes)
-}
-
-func (b *Backend) PreviewPath(path string) (string, error) {
-	return appcore.PreviewDataURL(path, appcore.DefaultPreviewMaxBytes)
+	return b.service().GetImage(b.appContext(), req)
 }
 
 func (b *Backend) GetTags(req appcore.TagsRequest) ([]store.TagSummary, error) {
-	return b.service().Tags(context.Background(), req)
+	return b.service().Tags(b.appContext(), req)
 }
 
 func (b *Backend) GetStats() (store.Stats, error) {
-	return b.service().Stats(context.Background())
+	return b.service().Stats(b.appContext())
 }
 
 func (b *Backend) PlanMove(req appcore.MoveRequest) ([]appcore.MovePlan, error) {
-	return b.service().PlanMove(context.Background(), req)
+	return b.service().PlanMove(b.appContext(), req)
 }
 
 func (b *Backend) ApplyMove(req appcore.MoveRequest) ([]appcore.MovePlan, error) {
-	return b.service().ApplyMove(context.Background(), req)
+	return b.service().ApplyMove(b.appContext(), req)
 }
 
 func (b *Backend) ExportJSON(out string, pretty bool) (ExportResult, error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
-		selected, err := wailsruntime.SaveFileDialog(b.ctx, wailsruntime.SaveDialogOptions{
+		selected, err := wailsruntime.SaveFileDialog(b.appContext(), wailsruntime.SaveDialogOptions{
 			Title:           "Export metadata JSON",
 			DefaultFilename: "imv-export.json",
 			Filters: []wailsruntime.FileFilter{{
@@ -176,30 +152,11 @@ func (b *Backend) ExportJSON(out string, pretty bool) (ExportResult, error) {
 	if out == "" {
 		return ExportResult{}, nil
 	}
-	records, err := b.service().Export(context.Background(), appcore.ExportRequest{Out: out, Pretty: pretty})
+	records, err := b.service().Export(b.appContext(), appcore.ExportRequest{Out: out, Pretty: pretty})
 	if err != nil {
 		return ExportResult{}, err
 	}
 	return ExportResult{Path: out, Count: len(records)}, nil
-}
-
-func (b *Backend) RevealFolder(path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("folder path is required")
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		path = filepath.Dir(path)
-	}
-	name, args, err := revealCommand(runtime.GOOS, path)
-	if err != nil {
-		return err
-	}
-	return exec.Command(name, args...).Start()
 }
 
 func (b *Backend) useFolder(folder string) FolderState {
@@ -210,21 +167,6 @@ func (b *Backend) useFolder(folder string) FolderState {
 	b.mu.Lock()
 	b.folder = state.Folder
 	b.dbPath = state.DBPath
-	b.file = ""
-	b.mu.Unlock()
-	return state
-}
-
-func (b *Backend) useFile(path string) FolderState {
-	state := FolderState{
-		Folder:       filepath.Dir(path),
-		DBPath:       appcore.DBPathForFolder(filepath.Dir(path)),
-		SelectedPath: path,
-	}
-	b.mu.Lock()
-	b.folder = state.Folder
-	b.dbPath = state.DBPath
-	b.file = state.SelectedPath
 	b.mu.Unlock()
 	return state
 }
@@ -236,15 +178,42 @@ func (b *Backend) service() *appcore.Service {
 	return appcore.New(dbPath)
 }
 
-func revealCommand(goos, path string) (string, []string, error) {
-	switch goos {
-	case "windows":
-		return "explorer", []string{path}, nil
-	case "darwin":
-		return "open", []string{path}, nil
-	case "linux":
-		return "xdg-open", []string{path}, nil
-	default:
-		return "", nil, fmt.Errorf("unsupported platform %q", goos)
+func (b *Backend) appContext() context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ctx != nil {
+		return b.ctx
 	}
+	return context.Background()
+}
+
+func (b *Backend) beginScanContext() (context.Context, func()) {
+	base := b.appContext()
+	b.mu.Lock()
+	if b.scanCancel != nil {
+		b.scanCancel()
+	}
+	b.scanSeq++
+	seq := b.scanSeq
+	ctx, cancel := context.WithCancel(base)
+	b.scanCancel = cancel
+	b.mu.Unlock()
+	return ctx, func() {
+		cancel()
+		b.mu.Lock()
+		if b.scanSeq == seq {
+			b.scanCancel = nil
+		}
+		b.mu.Unlock()
+	}
+}
+
+func (b *Backend) CancelScan() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.scanCancel == nil {
+		return false
+	}
+	b.scanCancel()
+	return true
 }

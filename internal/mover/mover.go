@@ -3,7 +3,9 @@ package mover
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,33 @@ type MovePlan struct {
 	DestinationPath string `json:"destination_path"`
 	Reason          string `json:"reason"`
 	Status          string `json:"status"`
+	Warning         string `json:"warning,omitempty"`
+}
+
+var errCrossDevice = errors.New("cross-device move")
+
+type fileOps struct {
+	rename     func(string, string) error
+	stat       func(string) (os.FileInfo, error)
+	open       func(string) (*os.File, error)
+	createTemp func(string, string) (*os.File, error)
+	remove     func(string) error
+	mkdirAll   func(string, os.FileMode) error
+	chmod      func(string, os.FileMode) error
+	chtimes    func(string, time.Time, time.Time) error
+}
+
+func defaultFileOps() fileOps {
+	return fileOps{
+		rename:     os.Rename,
+		stat:       os.Stat,
+		open:       os.Open,
+		createTemp: os.CreateTemp,
+		remove:     os.Remove,
+		mkdirAll:   os.MkdirAll,
+		chmod:      os.Chmod,
+		chtimes:    os.Chtimes,
+	}
 }
 
 func PlanAndMaybeApply(ctx context.Context, db *store.DB, opts Options) ([]MovePlan, error) {
@@ -38,7 +67,7 @@ func PlanAndMaybeApply(ctx context.Context, db *store.DB, opts Options) ([]MoveP
 	if opts.LogPath == "" {
 		opts.LogPath = ".imv/move-log.jsonl"
 	}
-	records, err := db.RecordsByTag(opts.Tag)
+	records, err := db.RecordsByTag(ctx, opts.Tag)
 	if err != nil {
 		return nil, err
 	}
@@ -77,50 +106,154 @@ func SanitizePathSegment(value string) string {
 	if value == "" {
 		return "untagged"
 	}
+	name := value
+	if ext := filepath.Ext(value); ext != "" {
+		name = strings.TrimSuffix(value, ext)
+	}
+	if isWindowsReservedName(name) {
+		value = "_" + value
+	}
 	return value
 }
 
+func isWindowsReservedName(value string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(value))
+	switch upper {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) {
+		return upper[3] >= '1' && upper[3] <= '9'
+	}
+	return false
+}
+
 func applyOne(ctx context.Context, db *store.DB, plan MovePlan, opts Options) (MovePlan, error) {
+	return applyOneWithFS(ctx, db, plan, opts, defaultFileOps())
+}
+
+func applyOneWithFS(ctx context.Context, db *store.DB, plan MovePlan, opts Options, ops fileOps) (MovePlan, error) {
 	dest := plan.DestinationPath
-	if _, err := os.Stat(dest); err == nil {
+	if _, err := ops.stat(dest); err == nil {
 		if opts.Conflict == "skip" {
 			plan.Status = "skipped_conflict"
-			return plan, appendLog(opts.LogPath, plan)
+			return withLogWarning(plan, appendLog(opts.LogPath, plan)), nil
 		}
-		dest = renamedPath(dest)
+		var renameErr error
+		dest, renameErr = renamedPathWithFS(dest, ops)
+		if renameErr != nil {
+			return plan, renameErr
+		}
 		plan.DestinationPath = dest
-	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+	} else if !os.IsNotExist(err) {
 		return plan, err
 	}
-	if err := os.Rename(plan.SourcePath, dest); err != nil {
+	if err := ops.mkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return plan, err
+	}
+	if err := movePath(plan.SourcePath, dest, ops); err != nil {
 		plan.Status = "failed"
-		_ = appendLog(opts.LogPath, plan)
+		plan = withLogWarning(plan, appendLog(opts.LogPath, plan))
 		return plan, err
 	}
 	if err := db.UpdatePath(ctx, plan.FileID, dest); err != nil {
-		if rollbackErr := os.Rename(dest, plan.SourcePath); rollbackErr == nil {
+		if rollbackErr := movePath(dest, plan.SourcePath, ops); rollbackErr == nil {
 			plan.Status = "failed_rolled_back"
 		} else {
 			plan.Status = "failed_needs_manual_repair"
 			err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
 		}
-		_ = appendLog(opts.LogPath, plan)
+		plan = withLogWarning(plan, appendLog(opts.LogPath, plan))
 		return plan, err
 	}
 	plan.Status = "moved"
-	return plan, appendLog(opts.LogPath, plan)
+	return withLogWarning(plan, appendLog(opts.LogPath, plan)), nil
 }
 
-func renamedPath(path string) string {
+func renamedPathWithFS(path string, ops fileOps) (string, error) {
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(path, ext)
 	for i := 1; ; i++ {
 		candidate := fmt.Sprintf("%s-%d%s", base, i, ext)
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
+		if _, err := ops.stat(candidate); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
 		}
 	}
+}
+
+func movePath(source, destination string, ops fileOps) error {
+	if err := ops.rename(source, destination); err == nil {
+		return nil
+	} else if !errors.Is(err, errCrossDevice) && !isPlatformCrossDevice(err) {
+		return err
+	}
+	return copyAcrossFilesystems(source, destination, ops)
+}
+
+func copyAcrossFilesystems(source, destination string, ops fileOps) (resultErr error) {
+	sourceFile, err := ops.open(source)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+	info, err := sourceFile.Stat()
+	if err != nil {
+		return err
+	}
+	temp, err := ops.createTemp(filepath.Dir(destination), ".imv-move-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	keepTemp := true
+	defer func() {
+		_ = temp.Close()
+		if keepTemp {
+			_ = ops.remove(tempPath)
+		}
+	}()
+	if _, err := io.Copy(temp, sourceFile); err != nil {
+		return err
+	}
+	if err := sourceFile.Close(); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := ops.chmod(tempPath, info.Mode().Perm()); err != nil {
+		return err
+	}
+	if _, err := ops.stat(destination); err == nil {
+		return os.ErrExist
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := ops.rename(tempPath, destination); err != nil {
+		return err
+	}
+	keepTemp = false
+	if err := ops.chtimes(destination, info.ModTime(), info.ModTime()); err != nil {
+		_ = ops.remove(destination)
+		return err
+	}
+	if err := ops.remove(source); err != nil {
+		_ = ops.remove(destination)
+		return err
+	}
+	return nil
+}
+
+func withLogWarning(plan MovePlan, err error) MovePlan {
+	if err != nil {
+		plan.Warning = "move log: " + err.Error()
+	}
+	return plan
 }
 
 func appendLog(path string, plan MovePlan) error {

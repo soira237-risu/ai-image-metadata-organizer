@@ -98,7 +98,6 @@ export type MovePlan = {
 export type FolderState = {
   folder: string;
   db_path: string;
-  selected_path?: string;
 };
 
 export type ExportResult = {
@@ -108,13 +107,10 @@ export type ExportResult = {
 
 export type BackendAPI = {
   OpenFolder(): Promise<FolderState>;
-  OpenFile(): Promise<FolderState>;
-  Reset(): Promise<FolderState>;
-  RevealFolder(path: string): Promise<void>;
-  InspectFile(path: string): Promise<ImageDetail>;
-  PreviewPath(path: string): Promise<string>;
+  ChooseDestinationFolder(): Promise<string>;
   State(): Promise<FolderState>;
   ScanFolder(folder: string, rescan: boolean): Promise<ScanResult>;
+  CancelScan(): Promise<boolean>;
   Search(req: SearchRequest): Promise<ImageRecord[]>;
   GetImage(req: { id?: number; path?: string; ref?: string; include_raw?: boolean; include_preview?: boolean; preview_max_bytes?: number }): Promise<ImageDetail>;
   GetTags(req: TagsRequest): Promise<TagSummary[]>;
@@ -125,9 +121,7 @@ export type BackendAPI = {
 };
 
 export type WailsRuntime = {
-  EventsOn?: (eventName: string, callback: (...args: unknown[]) => void) => void;
-  OnFileDrop?: (callback: (x: number, y: number, paths: string[]) => void, useDropTarget?: boolean) => void;
-  OnFileDropOff?: () => void;
+  EventsOn?: (eventName: string, callback: (...args: unknown[]) => void) => () => void;
 };
 
 declare global {

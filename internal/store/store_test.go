@@ -2,9 +2,51 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
+
+func TestOpenAppliesSchemaVersionAndConnectionPragmas(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "imv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var version int
+	if err := db.sql.QueryRow(`select max(version) from migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("schema version = %d", version)
+	}
+	var foreignKeys, busyTimeout int
+	if err := db.sql.QueryRow(`pragma foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.sql.QueryRow(`pragma busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 || busyTimeout != 5000 {
+		t.Fatalf("foreign_keys=%d busy_timeout=%d", foreignKeys, busyTimeout)
+	}
+}
+
+func TestSearchHonorsCanceledContext(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "imv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = db.Search(ctx, SearchOptions{Limit: 10})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
 
 func TestUpsertSearchExportAndUpdatePath(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "imv.db"))
@@ -31,7 +73,7 @@ func TestUpsertSearchExportAndUpdatePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unchanged, err := db.IsUnchanged("a.png", 12, 34)
+	unchanged, err := db.IsUnchanged(context.Background(), "a.png", 12, 34)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +81,7 @@ func TestUpsertSearchExportAndUpdatePath(t *testing.T) {
 		t.Fatalf("expected unchanged record")
 	}
 
-	found, err := db.Search(SearchOptions{Tag: "Blue Hair", Limit: 10})
+	found, err := db.Search(context.Background(), SearchOptions{Tag: "Blue Hair", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +92,7 @@ func TestUpsertSearchExportAndUpdatePath(t *testing.T) {
 	if err := db.UpdatePath(context.Background(), id, "sorted/blue hair/a.png"); err != nil {
 		t.Fatal(err)
 	}
-	exported, err := db.Export()
+	exported, err := db.Export(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +157,7 @@ func TestSearchFiltersTagsSummaryAndStats(t *testing.T) {
 		},
 	})
 
-	webpRecords, err := db.Search(SearchOptions{Format: "webp", Limit: 10})
+	webpRecords, err := db.Search(context.Background(), SearchOptions{Format: "webp", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +165,7 @@ func TestSearchFiltersTagsSummaryAndStats(t *testing.T) {
 		t.Fatalf("unexpected format filter result: %#v", webpRecords)
 	}
 
-	workflowRecords, err := db.Search(SearchOptions{HasWorkflow: true, Limit: 10})
+	workflowRecords, err := db.Search(context.Background(), SearchOptions{HasWorkflow: true, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +173,7 @@ func TestSearchFiltersTagsSummaryAndStats(t *testing.T) {
 		t.Fatalf("unexpected workflow filter result: %#v", workflowRecords)
 	}
 
-	tags, err := db.TagsSummary(TagSummaryOptions{Limit: 10})
+	tags, err := db.TagsSummary(context.Background(), TagSummaryOptions{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +184,7 @@ func TestSearchFiltersTagsSummaryAndStats(t *testing.T) {
 		t.Fatalf("unexpected tag sources: %#v", tags[0].Sources)
 	}
 
-	stats, err := db.Stats()
+	stats, err := db.Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

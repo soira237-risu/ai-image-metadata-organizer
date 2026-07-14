@@ -12,8 +12,31 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/soira237-risu/ai-image-metadata-organizer/internal/appcore"
 	"github.com/soira237-risu/ai-image-metadata-organizer/internal/store"
 )
+
+func TestScanCommandErrorHonorsFailOnError(t *testing.T) {
+	result := appcore.ScanResult{Errors: []appcore.FileError{{Path: "bad.png", Error: "decode failed"}}}
+	if err := scanCommandError(result, false); err != nil {
+		t.Fatalf("default scan should preserve current exit behavior: %v", err)
+	}
+	err := scanCommandError(result, true)
+	if err == nil || !strings.Contains(err.Error(), "1 file errors") {
+		t.Fatalf("expected strict scan error, got %v", err)
+	}
+}
+
+func TestRunWithIOContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dbPath := filepath.Join(t.TempDir(), "imv.db")
+
+	err := runWithIOContext(ctx, []string{"stats", "--db", dbPath}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected canceled command, got %v", err)
+	}
+}
 
 func TestParseInterspersedAllowsFlagsAfterPositional(t *testing.T) {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
@@ -32,15 +55,73 @@ func TestParseInterspersedAllowsFlagsAfterPositional(t *testing.T) {
 	}
 }
 
-func TestHelpUsesPublicProductIdentity(t *testing.T) {
+func TestSubcommandHelpFlagPrintsCommandUsageToStdout(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	if err := runWithIO([]string{"help"}, &stdout, &stderr); err != nil {
+	err := runWithIO([]string{"scan", "--help"}, &stdout, &stderr)
+	if err != nil {
 		t.Fatalf("help failed: %v", err)
 	}
+	for _, want := range []string{"Usage: imv scan", "-workers"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("help output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("help wrote stderr: %s", stderr.String())
+	}
+}
 
-	if got, want := strings.SplitN(stdout.String(), "\n", 2)[0], "imv - NovelAI-first AI image metadata organizer"; got != want {
-		t.Fatalf("help heading = %q, want %q", got, want)
+func TestHelpCommandPrintsSubcommandUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	err := runWithIO([]string{"help", "search"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("help failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Usage: imv search") {
+		t.Fatalf("unexpected help output:\n%s", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("help wrote stderr: %s", stderr.String())
+	}
+}
+
+func TestCommandsRejectUnexpectedPositionalArguments(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "imv.db")
+	outPath := filepath.Join(tempDir, "out.json")
+	tests := [][]string{
+		{"search", "unexpected", "--db", dbPath},
+		{"tags", "unexpected", "--db", dbPath},
+		{"stats", "unexpected", "--db", dbPath},
+		{"export", "unexpected", "--db", dbPath, "--out", outPath},
+		{"move", "unexpected", "--db", dbPath, "--tag", "blue hair", "--to", tempDir},
+	}
+
+	for _, args := range tests {
+		err := runWithIO(args, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "usage: imv "+args[0]) {
+			t.Fatalf("%v: expected usage error, got %v", args, err)
+		}
+	}
+}
+
+func TestCommandsRejectNonPositiveNumericOptions(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"scan", "images", "--workers", "0"}, want: "--workers must be greater than zero"},
+		{args: []string{"search", "--limit", "0"}, want: "--limit must be greater than zero"},
+		{args: []string{"tags", "--limit", "-1"}, want: "--limit must be greater than zero"},
+	}
+
+	for _, tt := range tests {
+		err := runWithIO(tt.args, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("%v: expected %q, got %v", tt.args, tt.want, err)
+		}
 	}
 }
 

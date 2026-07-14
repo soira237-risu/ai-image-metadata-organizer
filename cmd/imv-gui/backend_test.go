@@ -1,53 +1,35 @@
 package main
 
 import (
-	"path/filepath"
-	"runtime"
+	"context"
+	"errors"
 	"testing"
-
-	"github.com/soira237-risu/ai-image-metadata-organizer/internal/appcore"
 )
 
-func TestResetClearsSessionStateOnly(t *testing.T) {
+func TestCancelScanCancelsActiveScanContext(t *testing.T) {
 	backend := NewBackend()
-	folder := t.TempDir()
-	backend.useFolder(folder)
+	backend.startup(context.Background())
+	ctx, finish := backend.beginScanContext()
+	defer finish()
 
-	state := backend.Reset()
-	if state.Folder != "" || state.DBPath != appcore.DefaultDBPath {
-		t.Fatalf("unexpected reset state: %#v", state)
+	backend.CancelScan()
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("scan context was not canceled: %v", ctx.Err())
 	}
 }
 
-func TestFolderStateIncludesSelectedPathForOpenFile(t *testing.T) {
+func TestStartingNewScanCancelsPreviousScanContext(t *testing.T) {
 	backend := NewBackend()
-	imagePath := filepath.Join(t.TempDir(), "image.png")
+	backend.startup(context.Background())
+	first, finishFirst := backend.beginScanContext()
+	defer finishFirst()
+	second, finishSecond := backend.beginScanContext()
+	defer finishSecond()
 
-	state := backend.useFile(imagePath)
-	if state.Folder != filepath.Dir(imagePath) || state.SelectedPath != imagePath {
-		t.Fatalf("unexpected file state: %#v", state)
+	if !errors.Is(first.Err(), context.Canceled) {
+		t.Fatalf("previous scan context was not canceled: %v", first.Err())
 	}
-}
-
-func TestRevealCommandByPlatform(t *testing.T) {
-	tests := []struct {
-		goos string
-		name string
-	}{
-		{goos: "windows", name: "explorer"},
-		{goos: "darwin", name: "open"},
-		{goos: "linux", name: "xdg-open"},
-	}
-	for _, tt := range tests {
-		name, args, err := revealCommand(tt.goos, "C:\\images")
-		if err != nil {
-			t.Fatalf("revealCommand(%q) error: %v", tt.goos, err)
-		}
-		if name != tt.name || len(args) != 1 || args[0] != "C:\\images" {
-			t.Fatalf("unexpected command for %s on host %s: %q %#v", tt.goos, runtime.GOOS, name, args)
-		}
-	}
-	if _, _, err := revealCommand("plan9", "C:\\images"); err == nil {
-		t.Fatal("expected unsupported platform error")
+	if second.Err() != nil {
+		t.Fatalf("new scan context is already canceled: %v", second.Err())
 	}
 }
